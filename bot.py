@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 # --- [КОНФИГУРАЦИЯ] ---
 API_ID = 35523804          
 API_HASH = 'ff7673ebc0e925a32fb52693bdfae16f'     
-SESSION_NAME = 'hr_session'
+SESSION_NAME = 'hr_assistant_session'
 REPORT_CHAT_ID = 7238685565 
 RECRUITER_TAG = "@hannaober"
 
