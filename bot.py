@@ -140,7 +140,7 @@ async def handler(event):
             set_status(uid, "sent")
             
             await asyncio.sleep(random.randint(20, 40))
-            await client.send_message(uid, Здравствуйте! Увидела ваш запрос в группе! У нас сейчас открыта удаленная вакансия (крипто-направление). Вам интересно узнать детали?")
+            await client.send_message(uid, "Здравствуйте! Увидела ваш запрос в группе! У нас сейчас открыта удаленная вакансия (крипто-направление). Вам интересно узнать детали?")
             log(f"✅ Первое сообщение ушло к {username}")
         except Exception as e:
             log(f"❌ Ошибка в группе: {e}")
