@@ -19,18 +19,16 @@ RECRUITER_TAG = "@hannaober"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-user_db = {}   # user_id → "sent" / "offered" / "final"
+user_db = {}   # user_id → "sent" / "offered"
 
-# Жёсткий фильтр предложений работы
 STOP_PHRASES = [
     "ищем", "требуется", "вакансия", "набираем", "есть место", "прекрасное место",
     "оператор чата", "стример", "оплата от", "зарплата от", "от 2000", "оплачиваемый отпуск",
-    "хорошая команда", "карьерного", "заробітна плата", "від", "zł", "предлагаем", "набираємо"
+    "хорошая команда", "карьерного", "заробітна плата", "від", "zł", "предлагаем"
 ]
 
 def has_stop_phrase(text: str) -> bool:
-    text_lower = text.lower()
-    if any(p in text_lower for p in STOP_PHRASES):
+    if any(p in text.lower() for p in STOP_PHRASES):
         log.info(f"[СТОП-ФРАЗА] Отсечено: {text[:80]}...")
         return True
     return False
@@ -41,7 +39,7 @@ log = logging.getLogger(__name__)
 async def ai_check(text: str, task: str = "is_seeker") -> bool:
     prompts = {
         "is_seeker": "Отвечай ТОЛЬКО ДА или НЕТ. ДА — только если человек САМ ищет работу.",
-        "is_interested": "Человек сказал 'да' или проявил интерес? да, давай, интересно, расскажи, хочу, ок — это ДА. Отвечай ТОЛЬКО ДА или НЕТ."
+        "is_interested": "Человек проявил интерес? да, давай, интересно, расскажи, хочу, ок, подробнее — это ДА. Отвечай ТОЛЬКО ДА или НЕТ."
     }
     try:
         res = await ai_client.chat.completions.create(
@@ -67,31 +65,48 @@ async def handler(event):
     user_id = event.sender_id
     text = event.raw_text.strip()
 
-    # ====================== ЛИЧНЫЕ СООБЩЕНИЯ (самая надёжная проверка) ======================
-    if event.is_private:                                 # ← главное исправление
+    # ====================== ЛИЧКА — МАКСИМАЛЬНО НАДЁЖНАЯ ПРОВЕРКА ======================
+    is_personal = (
+        event.is_private or
+        event.chat_id == user_id or
+        (event.to_id and hasattr(event.to_id, 'user_id') and event.to_id.user_id == user_id)
+    )
+
+    if is_personal:
         status = user_db.get(user_id)
-        log.info(f"[ЛИЧКА] Получено от {user_id} | статус={status} | текст: '{text}'")
+        log.info(f"[ЛИЧКА] === СООБЩЕНИЕ ОТ {user_id} === статус={status} | текст: '{text}'")
 
-        if status and await ai_check(text, "is_interested"):
-            log.info(f"[ЛИЧКА] ✅ ИИ подтвердил интерес от {user_id}")
+        if status:
+            interested = await ai_check(text, "is_interested")
+            log.info(f"[ЛИЧКА] ИИ is_interested = {interested}")
 
-            if status == "sent":
-                await event.reply("Условия: удаленно, крипто-направление. ЗП: 2000€ + 2%. Обучение 2 дня. Подходит?")
-                user_db[user_id] = "offered"
-                log.info(f"[ЛИЧКА] Отправили условия кандидату {user_id}")
+            if interested:
+                if status == "sent":
+                    await event.reply(
+                        "Условия: удаленно, крипто-направление. ЗП: 2000€ + 2%. Обучение 2 дня. Подходит?"
+                    )
+                    user_db[user_id] = "offered"
+                    log.info(f"[ЛИЧКА] → Отправили условия кандидату {user_id}")
 
-            elif status == "offered":
-                await event.reply(f"Супер! Пишите куратору Ханне: {RECRUITER_TAG}")
-                user_db[user_id] = "final"
-                await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ДОЖАТ:** @{event.sender.username or user_id}")
-                log.info(f"[ЛИЧКА] ЛИД ДОЖАТ {user_id}")
-        return
+                elif status == "offered":
+                    await event.reply(f"Супер! Пишите куратору Ханне: {RECRUITER_TAG}")
+                    user_db[user_id] = "final"
+                    await client.send_message(
+                        REPORT_CHAT_ID,
+                        f"🔥 **ЛИД ДОЖАТ:** @{event.sender.username or user_id}"
+                    )
+                    log.info(f"[ЛИЧКА] → ЛИД ДОЖАТ {user_id}")
+        else:
+            log.info(f"[ЛИЧКА] Нет статуса для {user_id} — игнорируем")
+        return   # ← обязательно выходим
 
     # ====================== ГРУППЫ ======================
     if not event.is_group:
         return
+
     if (datetime.now(timezone.utc) - event.date).total_seconds() > 120:
         return
+
     if has_stop_phrase(text):
         return
 
@@ -99,8 +114,8 @@ async def handler(event):
         if user_id not in user_db:
             try:
                 chat = await event.get_chat()
-                msg_link = f"https://t.me/{chat.username}/{event.id}" if getattr(chat, 'username', None) else \
-                           f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}"
+                msg_link = f"https://t.me/{chat.username}/{event.id}" if getattr(chat, 'username', None) \
+                    else f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}"
 
                 report = (
                     f"🎯 **ЛИД НАЙДЕН**\n"
@@ -124,16 +139,13 @@ async def handler(event):
                 )
                 log.info(f"✅ Отправили первое сообщение → {user_id}")
 
-            except FloodWaitError as e:
-                log.warning(f"FloodWait {e.seconds} сек")
-                await asyncio.sleep(e.seconds)
             except Exception as e:
-                log.error(f"Ошибка отправки {user_id}: {e}")
+                log.error(f"Ошибка отправки лиду {user_id}: {e}")
 
 
 async def main():
     await client.start()
-    log.info("🚀 БОТ ЗАПУЩЕН — исправлена обработка ответов в ЛС (самая надёжная версия)")
+    log.info("🚀 БОТ ЗАПУЩЕН — максимально надёжная обработка ЛС")
     await client.run_until_disconnected()
 
 
