@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.types import User  # Добавили для точной проверки типа отправителя
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -62,6 +63,7 @@ def set_status(user_id, status):
 
 # --- ИИ ---
 async def ai_check(text, mode="is_seeker"):
+    if not text or len(text) < 2: return False
     log(f"🔎 ИИ ({mode}): {text[:40]}...")
     try:
         sys_prompt = "Ты HR. Ответь ДА, только если человек САМ ищет работу. НЕТ — если это вакансия или реклама." if mode == "is_seeker" else "Человек заинтересован? Ответь ДА или НЕТ."
@@ -83,12 +85,18 @@ client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 @client.on(events.NewMessage)
 async def handler(event):
-    if not event.sender_id or (event.sender and event.sender.bot): return
+    # Безопасная проверка отправителя
+    if not event.sender_id: return
+    
+    # Проверяем, что это именно человек (User), а не Канал или Бот
+    is_bot = getattr(event.sender, 'bot', False) if hasattr(event.sender, 'bot') else False
+    if not isinstance(event.sender, User) or is_bot:
+        return
     
     uid = event.sender_id
     text = event.raw_text.strip()
     
-    # 1. ОБРАБОТКА ЛИЧКИ
+    # 1. ЛИЧКА
     if event.is_private:
         status = get_status(uid)
         if status in ("sent", "offered") and await ai_check(text, "is_interest"):
@@ -101,35 +109,29 @@ async def handler(event):
                 await client.send_message(REPORT_CHAT_ID, f"🔥 ЛИД ГОТОВ: ID {uid}")
         return
 
-    # 2. ОБРАБОТКА ГРУПП
+    # 2. ГРУППЫ
     if not event.is_group: return
     if (datetime.now(timezone.utc) - event.date).total_seconds() > 600: return
 
-    # Если ИИ сказал ДА и мы еще не писали этому человеку
     if await ai_check(text, "is_seeker") and get_status(uid) is None:
-        log(f"🎯 Лид подтвержден ИИ. Начинаю процесс отправки для ID: {uid}")
+        log(f"🎯 Лид подтвержден. Процесс отправки для ID: {uid}")
         try:
-            # Получаем полные данные пользователя, чтобы Телеграм разрешил отправить ЛС
-            user = await event.get_sender()
+            user = event.sender
             username = f"@{user.username}" if user.username else f"ID: {uid}"
             chat = await event.get_chat()
             
-            # Отчет в канал
+            # Отчет
             await client.send_message(REPORT_CHAT_ID, f"🎯 **НОВЫЙ ЛИД**\n👤 {username}\n🏢 {chat.title}\n📝 {text[:100]}")
-            
-            # Ставим статус, чтобы не писать дважды
             set_status(uid, "sent")
             
-            # Небольшая пауза
-            log(f"⏳ Ждем 20 сек перед отправкой к {username}...")
-            await asyncio.sleep(20)
+            await asyncio.sleep(15)
             
             # Отправка в ЛС
-            await client.send_message(user, "Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия. Вам интересно узнать детали?")
+            await client.send_message(uid, "Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия. Вам интересно узнать детали?")
             log(f"✅ СООБЩЕНИЕ УШЛО К {username}")
             
         except Exception as e:
-            log(f"❌ ОШИБКА ПРИ ОТПРАВКЕ: {e}")
+            log(f"❌ ОШИБКА ОТПРАВКИ: {e}")
             await client.send_message(REPORT_CHAT_ID, f"⚠️ Ошибка ЛС для {uid}: `{str(e)}`")
 
 async def main():
