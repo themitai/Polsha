@@ -19,17 +19,23 @@ RECRUITER_TAG = "@hannaober"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-user_db = {}          # user_id -> status
-dialog_owner = {}     # user_id -> True (бот начал диалог)
+user_db = {}
+dialog_owner = {}
 
+# ========================= ЖЁСТКИЙ ФИЛЬТР =========================
 STOP_PHRASES = [
-    'ищем', 'требуется', 'вакансия', 'набираем', 'предлагаем работу',
-    'открыта вакансия', 'компания ищет', 'зп от', 'в офис', 'услуги', 'фнс'
+    "ищем", "требуется", "требуются", "вакансия", "вакансии", "набираем", "набираємо",
+    "оператор чату", "стример", "модель", "чат", "стримы", "заробітна плата", "зарплата від",
+    "від", "zł", "зл", "кар’єрного зростання", "карьерного роста", "работодатель",
+    "предлагаем", "предлагаємо", "компанія", "компания", "в команду", "в офіс", "на склад",
+    "оплата від", "графік", "график", "удалённо от компании"
 ]
 
 def has_stop_phrase(text: str) -> bool:
-    return any(phrase in text.lower() for phrase in STOP_PHRASES)
+    text_lower = text.lower()
+    return any(phrase in text_lower for phrase in STOP_PHRASES)
 
+# ========================= ЛОГИРОВАНИЕ =========================
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
@@ -37,17 +43,35 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# ========================= ИИ (усиленный) =========================
 async def ai_check(text: str, task: str = "is_seeker") -> bool:
     prompts = {
-        "is_seeker": "Отвечай ТОЛЬКО ДА или НЕТ. ДА — только если человек явно ищет работу.",
-        "is_interested": "Человек проявил интерес к вакансии? да, давай, интересно, расскажи, хочу, ок — это ДА. Отвечай ТОЛЬКО ДА или НЕТ."
+        "is_seeker": (
+            "Ты — очень строгий фильтр. Отвечай ТОЛЬКО одним словом: ДА или НЕТ.\n\n"
+            "ДА — только если человек **сам ищет работу**: "
+            "пишет 'ищу работу', 'ищу подработку', 'нужна работа', 'ищу удалёнку', "
+            "'рассмотрю предложения', 'есть ли вакансии для меня' и т.п.\n\n"
+            "НЕТ — во всех остальных случаях, особенно если:\n"
+            "- предлагает вакансию\n"
+            "- пишет про зарплату, график, условия для сотрудников\n"
+            "- упоминает 'оператор чату', 'стример', 'модель', 'чат'\n"
+            "- пишет на украинском/польском о найме людей\n"
+            "Будь максимально жёстким. Даже малейшее подозрение — НЕТ."
+        ),
+        "is_interested": (
+            "Человек проявил интерес к предложению работы? "
+            "Да, давай, интересно, расскажи, хочу, ок, хорошо, подойдёт — это ДА. "
+            "Отвечай ТОЛЬКО ДА или НЕТ."
+        )
     }
+
     try:
         res = await ai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompts[task]}, {"role": "user", "content": text}],
-            max_tokens=8,
-            temperature=0
+            messages=[{"role": "system", "content": prompts[task]},
+                      {"role": "user", "content": text}],
+            max_tokens=10,
+            temperature=0.0
         )
         return "ДА" in res.choices[0].message.content.upper()
     except Exception as e:
@@ -75,47 +99,38 @@ async def handler(event):
 
     if is_private:
         status = user_db.get(user_id)
-        owner = dialog_owner.get(user_id, False)
+        log.info(f"[ЛИЧКА] От {user_id} | статус={status} | текст=\"{text}\"")
 
-        log.info(f"[ЛИЧКА] От {user_id} | статус={status} | owner_бот={owner} | текст=\"{text}\"")
-
-        # Если диалог начал НЕ бот — всё равно пытаемся продолжить, если есть статус
         if status:
             try:
                 if await ai_check(text, "is_interested"):
-                    log.info(f"[ЛИЧКА] ИИ: интерес подтверждён от {user_id}")
-
                     if status == "sent":
-                        await event.reply(
-                            "Условия: удаленно, крипто-направление. ЗП: 2000€ + 2%. Обучение 2 дня. Подходит?"
-                        )
+                        await event.reply("Условия: удаленно, крипто-направление. ЗП: 2000€ + 2%. Обучение 2 дня. Подходит?")
                         user_db[user_id] = "offered"
                         log.info(f"[ЛИЧКА] Отправили условия → {user_id}")
 
                     elif status == "offered":
                         await event.reply(f"Супер! Пиши куратору Ханне: {RECRUITER_TAG}")
                         user_db[user_id] = "final"
-                        await client.send_message(
-                            REPORT_CHAT_ID,
-                            f"🔥 **ЛИД ДОЖАТ:** @{event.sender.username or user_id}"
-                        )
+                        await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ДОЖАТ:** @{event.sender.username or user_id}")
                         log.info(f"[ЛИЧКА] ЛИД ДОЖАТ → {user_id}")
-                else:
-                    log.info(f"[ЛИЧКА] ИИ: интерес НЕ подтверждён от {user_id}")
             except Exception as e:
                 log.error(f"Ошибка в личке {user_id}: {e}")
-        else:
-            log.info(f"[ЛИЧКА] Нет статуса для {user_id} — игнорируем")
         return
 
-    # ====================== ГРУППЫ ======================
+    # ====================== ГРУППЫ — ЖЁСТКАЯ ФИЛЬТРАЦИЯ ======================
     if not event.is_group:
         return
+
     if (datetime.now(timezone.utc) - event.date).total_seconds() > 120:
         return
+
+    # Первая жёсткая отсечка по ключевым словам
     if has_stop_phrase(text):
+        log.info(f"[ФИЛЬТР] Стоп-фраза → пропущено: {text[:80]}...")
         return
 
+    # Вторая проверка через ИИ (самая строгая)
     if await ai_check(text, "is_seeker"):
         if user_id not in user_db:
             try:
@@ -127,16 +142,16 @@ async def handler(event):
                     f"🎯 **ЛИД НАЙДЕН**\n"
                     f"👤 **Имя:** {event.sender.first_name or '—'}\n"
                     f"🆔 **ID:** `{user_id}`\n"
-                    f"💬 **Текст:** {text[:120]}\n"
+                    f"💬 **Текст:** {text[:140]}\n"
                     f"📍 **Группа:** {chat.title}\n"
                     f"🔗 [Ссылка]({msg_link})"
                 )
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
 
                 user_db[user_id] = "sent"
-                dialog_owner[user_id] = True   # помечаем, что бот начал диалог
+                dialog_owner[user_id] = True
 
-                await asyncio.sleep(random.randint(15, 35))
+                await asyncio.sleep(random.randint(18, 40))
 
                 await client.send_message(
                     user_id,
@@ -144,18 +159,18 @@ async def handler(event):
                     "У нас открыта удаленная позиция (крипто-сфера, без опыта). "
                     "Вам интересно узнать детали?"
                 )
-                log.info(f"✅ Бот отправил первое сообщение → {user_id}")
+                log.info(f"✅ Бот написал первому сообщению → {user_id} (Кира Соколова и подобные теперь должны отсеиваться)")
 
             except FloodWaitError as e:
                 log.warning(f"FloodWait {e.seconds} сек")
                 await asyncio.sleep(e.seconds + 5)
             except Exception as e:
-                log.error(f"Ошибка отправки лиду {user_id}: {e}")
+                log.error(f"Ошибка отправки {user_id}: {e}")
 
 
 async def main():
     await client.start()
-    log.info("🚀 БОТ ЗАПУЩЕН — режим 'бот ведёт диалог' + поддержка когда HR пишет первой")
+    log.info("🚀 БОТ ЗАПУЩЕН — ЖЁСТКАЯ ФИЛЬТРАЦИЯ (только соискатели)")
     await client.run_until_disconnected()
 
 
