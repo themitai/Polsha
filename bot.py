@@ -3,6 +3,7 @@ import os
 import sqlite3
 import random
 import threading
+import sys
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -12,10 +13,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # --- [КОНФИГУРАЦИЯ] ---
 API_ID = 35523804
 API_HASH = 'ff7673ebc0e925a32fb52693bdfae16f'
-REPORT_CHAT_ID = 7238685565
+REPORT_CHAT_ID = 7238685565 
 RECRUITER_TAG = "@hannaober"
 
-# Секреты из Railway
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSION_STR = os.getenv("TELEGRAM_SESSION")
 
@@ -25,12 +25,12 @@ DB_PATH = '/app/data/bot_data.db' if os.path.exists('/app/data') else 'bot_data.
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# --- [ОБМАНКА ДЛЯ RAILWAY] ---
+# --- [СЕРВЕР ДЛЯ RAILWAY] ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(b"WORKING")
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -60,31 +60,41 @@ def set_status(user_id, status):
         conn.close()
     except: pass
 
-# --- [ПРОВЕРКА ИИ С ДИАГНОСТИКОЙ] ---
+# --- [СТРОЖАЙШАЯ ПРОВЕРКА ИИ] ---
 async def ai_check(text, mode="is_seeker"):
-    log(f"🔎 ПРОВЕРКА ИИ ({mode}): '{text[:30]}...'")
+    log(f"🔎 ПРОВЕРКА ИИ ({mode}): '{text[:40]}...'")
     if not OPENAI_API_KEY:
-        log("❌ ОШИБКА: OPENAI_API_KEY не задан!")
+        log("❌ ОШИБКА: Нет ключа OpenAI!")
         return True if mode == "is_interest" else False
 
     try:
-        prompts = {
-            "is_seeker": "Ты HR. Ответь ДА, только если человек ИЩЕТ работу. Если ПРЕДЛАГАЕТ — ответь НЕТ.",
-            "is_interest": "Человек проявил интерес к вакансии (пишет 'да', 'подробнее', 'что за работа')? Ответь ДА или НЕТ."
-        }
+        if mode == "is_seeker":
+            sys_prompt = (
+                "Ты — эксперт-фильтр для HR. Твоя единственная цель — найти сообщения от ЛЮДЕЙ, КОТОРЫЕ ИЩУТ РАБОТУ. "
+                "СТРОГО ЗАПРЕЩЕНО (отвечай НЕТ): "
+                "- Если это объявление о найме (например: 'Ищем сотрудников', 'Вакансия', 'Требуются'). "
+                "- Если это реклама услуг (например: 'Делаю ремонт', 'Перевозки', 'Помогу с документами'). "
+                "- Если это спам, новости или общие вопросы. "
+                "СТРОГО РАЗРЕШЕНО (отвечай ДА): "
+                "- Если человек прямо пишет: 'Ищу работу', 'Нужна подработка', 'Возьмусь за любую работу', 'Я мастер, ищу заказы'. "
+                "Ответь только одним словом: ДА или НЕТ."
+            )
+        else:
+            sys_prompt = "Человек ответил на наше предложение и хочет узнать подробности или согласен? Ответь ДА или НЕТ."
+
         res = await ai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompts[mode]}, {"role": "user", "content": text}],
-            max_tokens=5, timeout=15
+            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
+            max_tokens=5, temperature=0 # 0 для максимальной точности
         )
         ans = res.choices[0].message.content.strip().upper()
-        log(f"✅ ИИ ОТВЕТИЛ: {ans}")
+        log(f"✅ ИИ ВЕРДИКТ: {ans}")
         return "ДА" in ans
     except Exception as e:
         log(f"❌ ОШИБКА ИИ: {e}")
         return True if mode == "is_interest" else False
 
-# --- [КЛИЕНТ] ---
+# --- [ОСНОВНОЙ ОБРАБОТЧИК] ---
 init_db()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
@@ -93,28 +103,25 @@ async def handler(event):
     if not event.sender or event.sender.bot: return
     uid = event.sender_id
     username = f"@{event.sender.username}" if event.sender.username else f"ID: {uid}"
-    first_name = event.sender.first_name or "Без имени"
+    first_name = event.sender.first_name or "User"
 
-    # 1. ЛИЧКА (Диалог)
+    # 1. ДИАЛОГ В ЛС
     if event.is_private:
         status = get_status(uid)
-        log(f"📩 ЛС от {username}: {event.raw_text[:30]} (Статус: {status})")
-        
         if status in ["sent", "offered"]:
             if await ai_check(event.raw_text, "is_interest"):
                 if status == "sent":
-                    await event.reply("💼 **Условия работы:**\n• Удаленно (крипто-проект)\n• Оплата: 2000€ + 2% бонус\n• Обучение: 2 дня (бесплатно)\n\nВам подходит такое направление?")
+                    await event.reply("💼 **Условия работы:**\n• Удаленно (крипто-сфера)\n• ЗП: 2000€ + 2% бонус\n• Обучение 2 дня. График гибкий.\n\nВам подходит такое?")
                     set_status(uid, "offered")
-                    log(f"✅ Условия отправлены {username}")
                 elif status == "offered":
-                    await event.reply(f"Отлично! Напишите нашему куратору Ханне для старта: {RECRUITER_TAG}")
+                    await event.reply(f"Супер! Для начала работы и связи с командой напишите куратору: {RECRUITER_TAG}")
                     set_status(uid, "final")
-                    await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ГОТОВ:**\n👤 {first_name} ({username})\n✅ Согласился на условия.")
-                    log(f"🔥 Лид {username} дожат!")
+                    await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ДОЖАТ:**\n👤 {first_name} ({username})\n✅ Получил контакт куратора.")
 
-    # 2. ГРУППЫ (Поиск)
+    # 2. МОНИТОРИНГ ГРУПП
     elif event.is_group:
-        if (datetime.now(timezone.utc) - event.date).total_seconds() > 600: return
+        # Игнорируем сообщения старше 5 минут
+        if (datetime.now(timezone.utc) - event.date).total_seconds() > 300: return
         
         if await ai_check(event.raw_text, "is_seeker"):
             if get_status(uid) is None:
@@ -122,32 +129,34 @@ async def handler(event):
                 group_name = chat.title
                 msg_link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}" if not chat.username else f"https://t.me/{chat.username}/{event.id}"
                 
-                log(f"🎯 ЛИД В ГРУППЕ '{group_name}': {username}")
-                
-                # ПОДРОБНЫЙ ОТЧЕТ
+                log(f"🎯 ЦЕЛЬ НАЙДЕНА: {username} в '{group_name}'")
+
+                # ПОДРОБНЫЙ ОТЧЕТ В КАНАЛ
                 report = (
-                    f"🎯 **НОВЫЙ ЛИД**\n"
-                    f"👤 **Кто:** {first_name} ({username})\n"
-                    f"🏢 **Группа:** {group_name}\n"
-                    f"📝 **Текст:** {event.raw_text}\n"
-                    f"🔗 [ПЕРЕЙТИ К СООБЩЕНИЮ]({msg_link})"
+                    f"🎯 **НАЙДЕН СОИСКАТЕЛЬ**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **КТО:** {first_name} ({username})\n"
+                    f"🏢 **ГДЕ:** {group_name}\n"
+                    f"📝 **ТЕКСТ:** _{event.raw_text}_\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🔗 [ОТКРЫТЬ В ГРУППЕ]({msg_link})"
                 )
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
                 
-                # Пишем в ЛС
+                # Пишем человеку
                 set_status(uid, "sent")
-                await asyncio.sleep(random.randint(25, 50))
+                await asyncio.sleep(random.randint(25, 55))
                 try: 
-                    await client.send_message(uid, "Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия (крипто-сфера). Вам интересно узнать детали?")
-                    log(f"✅ Приветствие отправлено {username}")
+                    await client.send_message(uid, "Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия (крипто-направление). Вам было бы интересно узнать детали?")
+                    log(f"✅ Написали в ЛС {username}")
                 except: 
                     log(f"❌ ЛС закрыты у {username}")
-                    await client.send_message(REPORT_CHAT_ID, f"⚠️ Не удалось написать в ЛС {username} (закрыто).")
+                    await client.send_message(REPORT_CHAT_ID, f"⚠️ Не смогла написать в ЛС @{event.sender.username or uid} (приватность).")
 
 async def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     await client.start()
-    log("🚀 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ")
+    log("🚀 СТРОГИЙ БОТ-HR ЗАПУЩЕН")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
