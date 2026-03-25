@@ -1,47 +1,72 @@
 import asyncio
 import random
 import os
+import logging
 from datetime import datetime, timezone
+
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 from openai import AsyncOpenAI
 
-# ================= КОНФИГУРАЦИЯ =================
+# ========================= КОНФИГУРАЦИЯ =========================
 API_ID = 35523804
 API_HASH = 'ff7673ebc0e925a32fb52693bdfae16f'
 SESSION_NAME = 'hr_assistant_session'
+
 REPORT_CHAT_ID = 7238685565
 RECRUITER_TAG = "@hannaober"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# База состояний пользователей
-user_db = {}   # user_id -> "sent" / "offered" / "final"
+# База в памяти
+user_db = {}
 
-# Минус-слова (отсекаем предложения услуг и вакансий)
+# ========================= ЖЁСТКИЙ СПИСОК СТОП-ФРАЗ =========================
+# Теперь бот почти не будет ловить тех, кто предлагает работу
 STOP_PHRASES = [
-    'ищем', 'вакансия', 'в офис', 'на склад', 'требуются', 'набираем',
-    'услуги', 'фнс', 'снимаем', 'выполняю', 'пробив', 'помогу с',
-    'оплата от', 'лс', 'запись', 'модели', 'тату', 'клиентов', 'ищу клиентов'
+    'ищем', 'ищем сотрудника', 'ищем человека', 'ищем на удаленку', 'ищем в команду',
+    'требуется', 'требуются', 'требуется сотрудник', 'требуется человек',
+    'вакансия', 'вакансии', 'открыта вакансия', 'открыты вакансии',
+    'набираем', 'набираем в команду', 'набираем сотрудников',
+    'предлагаем работу', 'предлагаем вакансию', 'работодатель',
+    'компания ищет', 'компания набирает', 'мы ищем',
+    'зп от', 'зарплата от', 'оклад', 'график работы', 'полный день',
+    'в офис', 'на склад', 'курьер', 'водитель', 'менеджер по продажам',
+    'удаленная работа от компании', 'работа в компании', 'присоединяйся к нам',
+    'услуги', 'фнс', 'пробив', 'помогу с', 'оформлю', 'снимаем', 'выполняю',
+    'оплата от', 'лс', 'запись', 'модели', 'тату', 'клиентов', 'реклама',
 ]
 
-def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+def has_stop_phrase(text: str) -> bool:
+    text_lower = text.lower()
+    return any(phrase in text_lower for phrase in STOP_PHRASES)
 
-# ================= ИИ-ПРОВЕРКИ =================
-async def ai_check(text, task="is_seeker"):
+# ========================= ЛОГИРОВАНИЕ =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+log = logging.getLogger(__name__)
+
+# ========================= ИИ (усиленный промпт) =========================
+async def ai_check(text: str, task: str = "is_seeker") -> bool:
     prompts = {
         "is_seeker": (
-            "Ты должен определить, ищет ли человек работу. "
-            "Ответь только ДА или НЕТ. "
-            "ДА — если человек пишет: ищу работу, ищу подработку, нужна удалёнка, ищу вакансию, нужен ворк, ищу заработок. "
-            "НЕТ — если человек предлагает услуги, работу, вакансию, помощь, пробив, ФНС и т.д."
+            "ТЫ — СТРОГИЙ ФИЛЬТР СОИСКАТЕЛЕЙ. "
+            "Отвечай ТОЛЬКО одним словом: ДА или НЕТ.\n\n"
+            "ДА — если человек явно ИЩЕТ РАБОТУ: "
+            "'ищу работу', 'ищу подработку', 'нужен ворк', 'ищу удалёнку', "
+            "'есть ли вакансии для меня', 'готов работать', 'рассмотрю предложения' и т.п.\n\n"
+            "НЕТ — во всех остальных случаях:\n"
+            "• если человек предлагает работу, вакансию, набирает людей\n"
+            "• если пишет 'ищем', 'требуется', 'вакансия', 'набираем'\n"
+            "• если предлагает услуги, ФНС, пробив, помощь\n"
+            "• если это реклама, продажа, тату, модели и т.д.\n"
+            "Будь максимально строгим. Даже небольшое подозрение на предложение работы — НЕТ."
         ),
-        "is_interested": (
-            "Определи, проявил ли человек интерес к предложенной вакансии. "
-            "Ответь только ДА или НЕТ. "
-            "ДА — если есть слова: да, интересно, подходит, хочу, расскажи, подробнее, ок, хорошо, давай, интересно, подойдёт."
-        )
+        "is_interested": "Человек проявил интерес к вакансии? Ответь только ДА или НЕТ."
     }
 
     try:
@@ -54,14 +79,16 @@ async def ai_check(text, task="is_seeker"):
             max_tokens=5,
             temperature=0
         )
-        answer = res.choices[0].message.content.strip().upper()
+        answer = res.choices[0].message.content.upper().strip()
         return "ДА" in answer
     except Exception as e:
-        log(f"AI error: {e}")
+        log.error(f"Ошибка OpenAI: {e}")
         return False
 
-# ================= ОСНОВНОЙ ХЕНДЛЕР =================
+
+# ========================= ТЕЛЕГРАМ КЛИЕНТ =========================
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+
 
 @client.on(events.NewMessage)
 async def handler(event):
@@ -71,99 +98,96 @@ async def handler(event):
     user_id = event.sender_id
     text = event.raw_text.strip()
 
-    # === 1. МОНИТОРИНГ ГРУПП ===
-    if event.is_group:
-        # Проверяем только свежие сообщения
-        if (datetime.now(timezone.utc) - event.date).total_seconds() > 180:
-            return
-
-        text_lower = text.lower()
-        if any(phrase in text_lower for phrase in STOP_PHRASES):
-            return
-
-        if await ai_check(text, "is_seeker"):
-            if user_id not in user_db:
-                chat = await event.get_chat()
-                msg_link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}" if not chat.username else f"https://t.me/{chat.username}/{event.id}"
-
-                report = (
-                    f"🎯 **ЛИД НАЙДЕН**\n"
-                    f"👤 **Имя:** {event.sender.first_name}\n"
-                    f"🆔 **ID:** `{user_id}`\n"
-                    f"💬 **Текст:** {text[:150]}\n"
-                    f"📍 **Группа:** {chat.title}\n"
-                    f"🔗 **Ссылка:** [ПЕРЕЙТИ]({msg_link})"
-                )
-                await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
-
-                # Отправляем первое сообщение
-                user_db[user_id] = "sent"
-                await asyncio.sleep(random.randint(18, 45))
-
-                try:
-                    await client.send_message(
-                        user_id,
-                        "Здравствуйте! Увидела ваш запрос в группе.\n\n"
-                        "У нас сейчас открыта **удалённая позиция** в крипто-сфере (P2P-арбитраж).\n"
-                        "Зарплата: **от 2000€ + 2% от профита**\n"
-                        "Обучение: 2 дня онлайн\n"
-                        "График: свободный\n\n"
-                        "Вам интересно узнать подробнее?"
-                    )
-                    log(f"Первое сообщение отправлено кандидату {user_id}")
-                except Exception:
-                    log(f"ЛС закрыты у {user_id}")
-                    user_db.pop(user_id, None)
-
-    # === 2. ДИАЛОГ В ЛИЧКЕ ===
-    elif event.is_private:
+    # ====================== 1. ЛИЧНЫЕ СООБЩЕНИЯ ======================
+    if event.is_private or event.chat_id == user_id:
         status = user_db.get(user_id)
-
         if not status:
             return
 
-        log(f"Ответ от кандидата {user_id}: {text}")
+        log.info(f"Ответ от кандидата {user_id}: {text}")
 
-        if status == "sent":
-            interested = await ai_check(text, "is_interested")
-            if interested:
-                await event.reply(
-                    "Отлично! Кратко расскажу условия:\n\n"
-                    "• Полностью удалённо\n"
-                    "• Направление: крипто-арбитраж, P2P\n"
-                    "• Зарплата: **от 2000€ фиксировано + 2% от профита**\n"
-                    "• Обучение: 2 дня (онлайн)\n"
-                    "• График: свободный\n\n"
-                    "Подходит вам такое предложение?"
+        try:
+            if await ai_check(text, "is_interested"):
+                if status == "sent":
+                    await event.reply(
+                        "Условия: удаленно, крипто-направление. "
+                        "ЗП: 2000€ + 2%. Обучение 2 дня. Подходит?"
+                    )
+                    user_db[user_id] = "offered"
+
+                elif status == "offered":
+                    await event.reply(
+                        f"Супер! Пишите куратору Ханне, она даст доступ к обучению: {RECRUITER_TAG}"
+                    )
+                    user_db[user_id] = "final"
+
+                    await client.send_message(
+                        REPORT_CHAT_ID,
+                        f"🔥 **ЛИД ДОЖАТ:** @{event.sender.username or user_id}"
+                    )
+        except Exception as e:
+            log.error(f"Ошибка при ответе кандидату {user_id}: {e}")
+        return
+
+    # ====================== 2. МОНИТОРИНГ ГРУПП (ЖЁСТКАЯ ФИЛЬТРАЦИЯ) ======================
+    if not event.is_group:
+        return
+
+    # Только свежие сообщения
+    if (datetime.now(timezone.utc) - event.date).total_seconds() > 120:
+        return
+
+    # === ЖЁСТКАЯ ПРОВЕРКА 1: стоп-фразы ===
+    if has_stop_phrase(text):
+        return
+
+    # === ЖЁСТКАЯ ПРОВЕРКА 2: ИИ ===
+    if await ai_check(text, "is_seeker"):
+        if user_id not in user_db:
+            try:
+                chat = await event.get_chat()
+
+                if chat.username:
+                    msg_link = f"https://t.me/{chat.username}/{event.id}"
+                else:
+                    msg_link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}"
+
+                report = (
+                    f"🎯 **ЛИД НАЙДЕН**\n"
+                    f"👤 **Имя:** {event.sender.first_name or 'Без имени'}\n"
+                    f"🆔 **ID:** `{user_id}`\n"
+                    f"💬 **Текст:** {text[:150]}{'...' if len(text) > 150 else ''}\n"
+                    f"📍 **Группа:** {chat.title}\n"
+                    f"🔗 **Ссылка:** [ПЕРЕЙТИ]({msg_link})"
                 )
-                user_db[user_id] = "offered"
-            else:
-                await event.reply("Поняла. Если передумаете или появятся вопросы — пишите в любое время.")
 
-        elif status == "offered":
-            interested = await ai_check(text, "is_interested")
-            if interested:
-                await event.reply(
-                    f"Супер! Теперь пишите напрямую нашему куратору Ханне — она даст полный доступ к обучению и всем материалам:\n\n"
-                    f"{RECRUITER_TAG}\n\n"
-                    "Будем рады видеть вас в команде! 💼"
-                )
-                user_db[user_id] = "final"
+                await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
 
-                # Отчёт в группу
+                user_db[user_id] = "sent"
+                await asyncio.sleep(random.randint(15, 35))
+
                 await client.send_message(
-                    REPORT_CHAT_ID,
-                    f"🔥 **ЛИД ДОЖАТ!**\n"
-                    f"👤 @{event.sender.username or user_id}\n"
-                    f"💬 {text[:120]}"
+                    user_id,
+                    "Здравствуйте! Увидела ваш запрос в группе. "
+                    "У нас сейчас открыта удаленная позиция (крипто-сфера, без опыта). "
+                    "Вам интересно узнать детали?"
                 )
-            else:
-                await event.reply("Поняла. Если появятся вопросы — обращайтесь в любое время.")
 
+                log.info(f"✅ Отправлено первое сообщение кандидату {user_id}")
+
+            except FloodWaitError as e:
+                log.warning(f"FloodWaitError: ждём {e.seconds} сек")
+                await asyncio.sleep(e.seconds + 5)
+            except Exception as e:
+                log.error(f"Ошибка при обработке лида {user_id}: {e}")
+
+
+# ========================= ЗАПУСК =========================
 async def main():
     await client.start()
-    log("🚀 БОТ ЗАПУЩЕН — поиск соискателей + полноценный диалог в ЛС")
+    log.info("🚀 БОТ ЗАПУЩЕН С ЖЁСТКОЙ ФИЛЬТРАЦИЕЙ (только соискатели)")
     await client.run_until_disconnected()
+
 
 if __name__ == '__main__':
     asyncio.run(main())
