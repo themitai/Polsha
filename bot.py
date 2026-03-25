@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import InputPeerUser
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -84,13 +83,12 @@ client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 @client.on(events.NewMessage)
 async def handler(event):
-    if not event.sender or event.sender.bot: return
+    if not event.sender_id or (event.sender and event.sender.bot): return
     
     uid = event.sender_id
     text = event.raw_text.strip()
-    username = f"@{event.sender.username}" if event.sender.username else f"ID: {uid}"
-
-    # ЛИЧКА
+    
+    # 1. ОБРАБОТКА ЛИЧКИ
     if event.is_private:
         status = get_status(uid)
         if status in ("sent", "offered") and await ai_check(text, "is_interest"):
@@ -100,35 +98,39 @@ async def handler(event):
             elif status == "offered":
                 await event.reply(f"Напишите куратору: {RECRUITER_TAG}")
                 set_status(uid, "final")
-                await client.send_message(REPORT_CHAT_ID, f"🔥 ЛИД ГОТОВ: {username}")
+                await client.send_message(REPORT_CHAT_ID, f"🔥 ЛИД ГОТОВ: ID {uid}")
         return
 
-    # ГРУППЫ
+    # 2. ОБРАБОТКА ГРУПП
     if not event.is_group: return
     if (datetime.now(timezone.utc) - event.date).total_seconds() > 600: return
 
+    # Если ИИ сказал ДА и мы еще не писали этому человеку
     if await ai_check(text, "is_seeker") and get_status(uid) is None:
+        log(f"🎯 Лид подтвержден ИИ. Начинаю процесс отправки для ID: {uid}")
         try:
+            # Получаем полные данные пользователя, чтобы Телеграм разрешил отправить ЛС
+            user = await event.get_sender()
+            username = f"@{user.username}" if user.username else f"ID: {uid}"
             chat = await event.get_chat()
-            log(f"🎯 Лид найден: {username}. Пробую отправить ЛС...")
             
-            # 1. Сначала шлем отчет тебе
+            # Отчет в канал
             await client.send_message(REPORT_CHAT_ID, f"🎯 **НОВЫЙ ЛИД**\n👤 {username}\n🏢 {chat.title}\n📝 {text[:100]}")
             
-            # 2. Ставим статус ПЕРЕД отправкой, чтобы не спамить в случае ошибки
+            # Ставим статус, чтобы не писать дважды
             set_status(uid, "sent")
             
-            # 3. Пытаемся получить сущность пользователя (важно для новых диалогов)
-            user_peer = await client.get_input_entity(uid)
+            # Небольшая пауза
+            log(f"⏳ Ждем 20 сек перед отправкой к {username}...")
+            await asyncio.sleep(20)
             
-            # 4. Пауза и отправка
-            await asyncio.sleep(random.randint(15, 25))
-            await client.send_message(user_peer, "Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия. Вам интересно узнать детали?")
-            log(f"✅ УСПЕХ: Сообщение ушло к {username}")
+            # Отправка в ЛС
+            await client.send_message(user, "Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия. Вам интересно узнать детали?")
+            log(f"✅ СООБЩЕНИЕ УШЛО К {username}")
             
         except Exception as e:
-            log(f"❌ КРИТИЧЕСКАЯ ОШИБКА для {username}: {e}")
-            await client.send_message(REPORT_CHAT_ID, f"⚠️ Ошибка отправки ЛС для {username}: `{str(e)}`")
+            log(f"❌ ОШИБКА ПРИ ОТПРАВКЕ: {e}")
+            await client.send_message(REPORT_CHAT_ID, f"⚠️ Ошибка ЛС для {uid}: `{str(e)}`")
 
 async def main():
     threading.Thread(target=run_health_server, daemon=True).start()
