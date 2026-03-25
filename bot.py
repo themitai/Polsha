@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import User  # Добавили для точной проверки типа отправителя
+from telethon.tl.types import User
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -59,14 +59,24 @@ def set_status(user_id, status):
         conn.execute("INSERT OR REPLACE INTO users (user_id, status) VALUES (?, ?)", (user_id, status))
         conn.commit()
         conn.close()
+        log(f"💾 Статус ID {user_id} обновлен на: {status}")
     except Exception as e: log(f"❌ Ошибка БД: {e}")
 
-# --- ИИ ---
+# --- ИИ С УЛУЧШЕННЫМ ПОНИМАНИЕМ ---
 async def ai_check(text, mode="is_seeker"):
-    if not text or len(text) < 2: return False
-    log(f"🔎 ИИ ({mode}): {text[:40]}...")
+    if not text: return False
+    log(f"🔎 ИИ проверка ({mode}): {text[:50]}...")
     try:
-        sys_prompt = "Ты HR. Ответь ДА, только если человек САМ ищет работу. НЕТ — если это вакансия или реклама." if mode == "is_seeker" else "Человек заинтересован? Ответь ДА или НЕТ."
+        if mode == "is_seeker":
+            sys_prompt = "Ты HR. Ответь ДА, если человек САМ ищет работу или подработку или удаленную занятость. НЕТ — если это вакансия или спам."
+        else:
+            # Улучшенный промпт для распознавания интереса
+            sys_prompt = (
+                "Ты ассистент рекрутера. Клиент получил предложение работы и ответил. "
+                "Он выразил интерес? (Да, расскажите, интересно, +, ок, слушаю). "
+                "Если да — ответь ТОЛЬКО 'ДА'. Если нет или это спам — ответь 'НЕТ'."
+            )
+
         res = await ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
@@ -85,54 +95,55 @@ client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 @client.on(events.NewMessage)
 async def handler(event):
-    # Безопасная проверка отправителя
     if not event.sender_id: return
     
-    # Проверяем, что это именно человек (User), а не Канал или Бот
+    # Игнорируем других ботов и каналы
     is_bot = getattr(event.sender, 'bot', False) if hasattr(event.sender, 'bot') else False
-    if not isinstance(event.sender, User) or is_bot:
-        return
-    
+    if not isinstance(event.sender, User) or is_bot: return
+
     uid = event.sender_id
     text = event.raw_text.strip()
-    
-    # 1. ЛИЧКА
+    username = f"@{event.sender.username}" if event.sender.username else f"ID: {uid}"
+
+    # 1. ЛИЧКА (Продолжение диалога)
     if event.is_private:
         status = get_status(uid)
-        if status in ("sent", "offered") and await ai_check(text, "is_interest"):
-            if status == "sent":
-                await event.reply("💼 **Условия:** Удаленно, крипто. ЗП 2000€ + %. Подходит?")
-                set_status(uid, "offered")
-            elif status == "offered":
-                await event.reply(f"Напишите куратору: {RECRUITER_TAG}")
-                set_status(uid, "final")
-                await client.send_message(REPORT_CHAT_ID, f"🔥 ЛИД ГОТОВ: ID {uid}")
+        log(f"📩 Сообщение в личке от {username} (Текущий статус: {status})")
+        
+        if status in ("sent", "offered"):
+            if await ai_check(text, "is_interest"):
+                if status == "sent":
+                    await event.reply(
+                        "💼 **Условия работы:**\n"
+                        "• Удаленно (крипто-сфера)\n"
+                        "• ЗП: 2000€ + 2% бонус\n"
+                        "• Обучение 2-5 дня. График гибкий.\n\n"
+                        "Вам подходит такое направление?"
+                    )
+                    set_status(uid, "offered")
+                elif status == "offered":
+                    await event.reply(f"Отлично! Для связи с куратором и начала обучения напишите: {RECRUITER_TAG}")
+                    set_status(uid, "final")
+                    await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ДОЖАТ:** {username}")
         return
 
-    # 2. ГРУППЫ
+    # 2. ГРУППЫ (Поиск новых)
     if not event.is_group: return
     if (datetime.now(timezone.utc) - event.date).total_seconds() > 600: return
 
     if await ai_check(text, "is_seeker") and get_status(uid) is None:
-        log(f"🎯 Лид подтвержден. Процесс отправки для ID: {uid}")
         try:
-            user = event.sender
-            username = f"@{user.username}" if user.username else f"ID: {uid}"
             chat = await event.get_chat()
+            log(f"🎯 Лид в группе: {username}")
             
-            # Отчет
             await client.send_message(REPORT_CHAT_ID, f"🎯 **НОВЫЙ ЛИД**\n👤 {username}\n🏢 {chat.title}\n📝 {text[:100]}")
             set_status(uid, "sent")
             
-            await asyncio.sleep(15)
-            
-            # Отправка в ЛС
-            await client.send_message(uid, "Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия. Вам интересно узнать детали?")
-            log(f"✅ СООБЩЕНИЕ УШЛО К {username}")
-            
+            await asyncio.sleep(random.randint(20, 40))
+            await client.send_message(uid, Здравствуйте! Увидела ваш запрос в группе. У нас сейчас открыта удаленная вакансия (крипто-направление). Вам интересно узнать детали?")
+            log(f"✅ Первое сообщение ушло к {username}")
         except Exception as e:
-            log(f"❌ ОШИБКА ОТПРАВКИ: {e}")
-            await client.send_message(REPORT_CHAT_ID, f"⚠️ Ошибка ЛС для {uid}: `{str(e)}`")
+            log(f"❌ Ошибка в группе: {e}")
 
 async def main():
     threading.Thread(target=run_health_server, daemon=True).start()
