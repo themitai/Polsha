@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import User
+from telethon.tl.types import User, Channel, Chat
+from telethon.errors import FloodWaitError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -20,12 +21,20 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSION_STR = os.getenv("TELEGRAM_SESSION")
 
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-DB_PATH = os.getenv("DB_PATH", "bot_final_v7.db")
+DB_PATH = "is_seeker_v10.db"
+
+# --- ВАРИАНТЫ ПЕРВОГО СООБЩЕНИЯ (РАНДОМИЗАЦИЯ) ---
+FIRST_MESSAGES = [
+    "Здравствуйте! Увидела ваше сообщение в группе по поводу поиска работы. У нас сейчас открыта удаленная вакансия (крипто-сфера). Вам было бы интересно узнать подробности?",
+    "Добрый день! Заметила ваш пост в чате, что вы ищете работу. Подскажите, рассматриваете удаленку в крипто-проекте? Могу рассказать детали.",
+    "Приветствую! Наткнулась на ваше объявление в группе. Мы как раз ищем людей на удаленную позицию в крипто-направлении. Хотели бы ознакомиться с условиями?",
+    "Здравствуйте! Вы писали в группе, что ищете работу. У нас есть предложение по удаленному сотрудничеству (крипто). Если актуально, могу скинуть подробности."
+]
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# --- HEALTH SERVER (Railway) ---
+# --- HEALTH SERVER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -58,118 +67,111 @@ def set_status(user_id, status):
         conn.execute("INSERT OR REPLACE INTO users (user_id, status) VALUES (?, ?)", (user_id, status))
         conn.commit()
         conn.close()
-        log(f"💾 Статус ID {user_id} -> {status}")
     except Exception as e: log(f"❌ Ошибка БД: {e}")
 
 # --- ИИ МОЗГ ---
 async def ai_check(text, mode="is_seeker"):
     if not text or len(text) < 2: return False
-    log(f"🔎 ИИ проверка ({mode}): {text[:40]}...")
     try:
-        if mode == "is_seeker":
-            sys_prompt = "Ты HR. Ответь ДА, только если человек САМ ищет работу. НЕТ — если это вакансия, реклама или спам."
-        else:
-            sys_prompt = "Клиент ответил на предложение. Он заинтересован? Ответь ТОЛЬКО ДА или НЕТ."
-
+        sys_prompt = "Ты HR. Ответь ДА, только если человек САМ ищет работу. НЕТ — вакансия или спам." if mode == "is_seeker" else "Клиент заинтересован в предложении? Ответь ДА или НЕТ."
         res = await ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
             max_tokens=5, temperature=0
         )
         ans = res.choices[0].message.content.strip().upper()
-        log(f"✅ ИИ вердикт: {ans}")
         return "ДА" in ans
     except Exception as e:
         log(f"❌ Ошибка ИИ: {e}")
         return False
 
-# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
+# --- ОБРАБОТЧИК ---
 init_db()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 @client.on(events.NewMessage)
 async def handler(event):
     if not event.sender_id: return
-    
-    # Игнорируем ботов и каналы
     is_bot = getattr(event.sender, 'bot', False) if hasattr(event.sender, 'bot') else False
     if not isinstance(event.sender, User) or is_bot: return
 
     uid = event.sender_id
     text = event.raw_text.strip()
     
-    # Формируем данные пользователя
+    # Ссылки и данные
     first_name = event.sender.first_name or "User"
-    username = f"@{event.sender.username}" if event.sender.username else "Нет юзернейма"
-    user_link = f"tg://user?id={uid}"
+    username = f"@{event.sender.username}" if event.sender.username else f"ID: {uid}"
+    user_url = f"tg://user?id={uid}"
 
-    # 1. ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ (Ответы на рассылку)
+    # 1. ЛИЧНЫЕ СООБЩЕНИЯ (Диалог)
     if event.is_private:
         status = get_status(uid)
-        if status in ("sent", "offered"):
-            log(f"📩 ЛС от {username}: {text}")
-            if await ai_check(text, "is_interest"):
-                await asyncio.sleep(random.randint(5, 10)) # Имитация печати
+        if status in ("sent", "offered") and await ai_check(text, "is_interest"):
+            await asyncio.sleep(random.randint(5, 12))
+            try:
                 if status == "sent":
-                    await event.reply(
-                        "💼 **Наши условия:**\n"
-                        "• Удаленная работа (крипто-направление)\n"
-                        "• Оплата: 2000€ фиксированно + 2% бонус\n"
-                        "• Обучение предоставляем (2 дня)\n\n"
-                        "Подскажите, вам было бы интересно попробовать?"
-                    )
+                    await event.reply("💼 **Условия:** Удаленно (крипто). ЗП 2000€ + %. Подходит?")
                     set_status(uid, "offered")
                 elif status == "offered":
-                    await event.reply(f"Супер! Для старта обучения напишите нашему куратору: {RECRUITER_TAG}")
+                    await event.reply(f"Напишите куратору: {RECRUITER_TAG}")
                     set_status(uid, "final")
-                    await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ГОТОВ!**\n👤 {first_name} ({username})\n🔗 [ПЕРЕЙТИ К ЛИДУ]({user_link})", link_preview=False)
+                    await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ДОЖАТ!**\n👤 {first_name} ({username})\n🔗 [ПЕРЕЙТИ К ДИАЛОГУ]({user_url})", link_preview=False)
+            except FloodWaitError as e: await asyncio.sleep(e.seconds)
         return
 
-    # 2. ОБРАБОТКА ГРУПП (Поиск соискателей)
-    if not event.is_group: return
-    if (datetime.now(timezone.utc) - event.date).total_seconds() > 600: return
+    # 2. ГРУППЫ (Поиск)
+    if event.is_group:
+        if (datetime.now(timezone.utc) - event.date).total_seconds() > 600: return
 
-    if await ai_check(text, "is_seeker") and get_status(uid) is None:
-        try:
-            chat = await event.get_chat()
-            group_name = chat.title
-            log(f"🎯 Найден соискатель: {username}")
+        if await ai_check(text, "is_seeker") and get_status(uid) is None:
+            try:
+                chat = await event.get_chat()
+                group_name = chat.title
+                
+                # Ссылка на сообщение (валидна для публичных групп и супергрупп)
+                msg_id = event.id
+                if hasattr(chat, 'username') and chat.username:
+                    msg_link = f"https://t.me/{chat.username}/{msg_id}"
+                else:
+                    # Для закрытых групп ссылка через ID чата
+                    chat_id = str(event.chat_id).replace("-100", "")
+                    msg_link = f"https://t.me/c/{chat_id}/{msg_id}"
 
-            # 1. Сразу отправляем подробный отчет в твой канал
-            report_msg = (
-                f"🎯 **НОВЫЙ ЛИД ОБНАРУЖЕН**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"👤 **Имя:** {first_name}\n"
-                f"🆔 **Username:** {username}\n"
-                f"🏢 **Группа:** {group_name}\n"
-                f"📝 **Сообщение:** {text[:150]}\n"
-                f"🔗 **Ссылка:** [ОТКРЫТЬ ПРОФИЛЬ]({user_link})"
-            )
-            await client.send_message(REPORT_CHAT_ID, report_msg, link_preview=False)
-            
-            # Ставим статус, чтобы не писать повторно
-            set_status(uid, "sent")
+                log(f"🎯 Лид в {group_name}: {username}")
 
-            # 2. Анти-спам пауза перед отправкой в ЛС (от 1 до 2.5 минут)
-            delay = random.randint(60, 150)
-            log(f"⏳ Пауза {delay} сек перед отправкой сообщения в ЛС...")
-            await asyncio.sleep(delay)
+                # Формируем отчет
+                report_text = (
+                    f"🎯 **НОВЫЙ ЛИД ОБНАРУЖЕН**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **Имя:** {first_name}\n"
+                    f"🆔 **Аккаунт:** [{username}]({user_url})\n"
+                    f"🏢 **Группа:** {group_name}\n"
+                    f"📝 **Сообщение:** \n_{text}_\n\n"
+                    f"🔗 [ССЫЛКА НА СООБЩЕНИЕ]({msg_link})"
+                )
+                
+                await client.send_message(REPORT_CHAT_ID, report_text, link_preview=False)
+                set_status(uid, "sent")
 
-            # 3. Отправка первого сообщения в ЛС
-            await client.send_message(uid, "Здравствуйте! Увидела ваше сообщение в группе. У нас сейчас открыта удаленная вакансия (крипто-направление). Вам было бы интересно узнать подробности?")
-            log(f"✅ Сообщение успешно отправлено к {username}")
+                # Пауза перед ЛС
+                delay = random.randint(80, 200)
+                log(f"⏳ Пауза {delay} сек перед ЛС для {username}...")
+                await asyncio.sleep(delay)
 
-        except Exception as e:
-            if "Too many requests" in str(e):
-                log("⚠️ Telegram ограничил отправку (FloodWait). Ждем...")
-            else:
+                # Отправка случайного приветствия
+                await client.send_message(uid, random.choice(FIRST_MESSAGES))
+                log(f"✅ Сообщение отправлено к {username}")
+
+            except FloodWaitError as e:
+                log(f"⚠️ Ждем {e.seconds} сек (FloodWait)")
+                await asyncio.sleep(e.seconds)
+            except Exception as e:
                 log(f"❌ Ошибка: {e}")
 
-# --- ЗАПУСК ---
 async def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     await client.start()
-    log("🚀 БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ")
+    log("🚀 БОТ ЗАПУЩЕН")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
