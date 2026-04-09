@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 API_ID = 34278859
 API_HASH = '7bd3351d245de7b793653188d915e147'
 REPORT_CHAT_ID = 8285184221
-RECRUITER_TAG = "@HRivan2"
+RECRUITER_TAG = "@HRivan2
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSION_STR = os.getenv("TELEGRAM_SESSION")
@@ -23,7 +23,6 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
 
-# ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
     "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
     "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
@@ -120,44 +119,44 @@ async def handler(event):
 
     if matched_trigger and get_status(uid) is None:
         if await ai_check(text, "is_lead"):
+            log(f"✅ ИИ одобрил лида {uid}. Готовим отчёт...")
+
             try:
-                # Получаем информацию о пользователе
-                user = await client.get_entity(uid)
                 chat = await event.get_chat()
 
-                username = f"@{user.username}" if user.username else "Нет username"
-                phone = getattr(user, 'phone', None) or "Скрыт"
+                username = f"@{event.sender.username}" if event.sender.username else f"ID:{uid}"
                 user_link = f"tg://user?id={uid}"
 
                 report = (
                     f"🎯 **ЛИД НАЙДЕН**\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 Имя: {user.first_name or '—'}\n"
+                    f"👤 Имя: {event.sender.first_name or '—'}\n"
                     f"🆔 ID: `{uid}`\n"
-                    f"📱 Телефон: {phone}\n"
-                    f"🔗 Прямая ссылка на профиль: [Открыть чат]({user_link})\n"
+                    f"🔗 Прямая ссылка: [Открыть чат]({user_link})\n"
                     f"🏠 Группа: {chat.title}\n"
-                    f"💬 Сообщение: {text[:200]}\n"
+                    f"💬 {text[:180]}\n"
                     f"🔍 Триггер: {matched_trigger}"
                 )
 
+                # Отправка отчёта
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
                 log(f"✅ Отчёт о лиде отправлен в REPORT_CHAT_ID")
 
                 set_status(uid, "sent")
 
+                # Отправка первого сообщения пользователю
                 await asyncio.sleep(random.randint(50, 160))
 
-                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
-                log(f"✅ Первое сообщение отправлено пользователю {uid}")
+                try:
+                    await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
+                    log(f"✅ Первое сообщение отправлено пользователю {uid}")
+                except Exception as send_err:
+                    log(f"⚠️ Не удалось отправить сообщение пользователю {uid}: {send_err}")
 
-            except FloodWaitError as e:
-                log(f"⏳ FloodWait: ждём {e.seconds} сек")
-                await asyncio.sleep(e.seconds)
-            except UserIsBlockedError:
-                log(f"⛔ Пользователь {uid} заблокировал бота")
             except Exception as e:
-                log(f"❌ Ошибка при обработке лида {uid}: {e}")
+                log(f"❌ Общая ошибка при обработке лида {uid}: {e}")
+        else:
+            log("🧠 ИИ отклонил лида")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -171,7 +170,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.7 — с прямой ссылкой и телефоном")
+    log("🎯 Режим: Lead Generator v3.8 — упрощённая отправка")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
