@@ -12,7 +12,7 @@ from telethon.sessions import StringSession
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ========================= КОНФИГ =========================
+# ========================= CONFIG =========================
 API_ID = 35975193
 API_HASH = '5929ba2233799d47756cfee57b71c4a5'
 
@@ -24,12 +24,6 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
-
-TRIGGER_WORDS = ["тест", "test", "ищу работу", "ищу жилье"]
-STOP_WORDS = ["вакансия", "набираем"]
-
-MAX_MESSAGES_PER_HOUR = 15
-sent_times = []
 
 # ====================== LOG ======================
 def log(msg):
@@ -56,149 +50,29 @@ def set_status(user_id, status):
     conn.commit()
     conn.close()
 
-# ====================== АНТИ-ФЛУД ======================
-def can_send():
-    now = time.time()
-    global sent_times
-
-    sent_times = [t for t in sent_times if now - t < 3600]
-
-    if len(sent_times) >= MAX_MESSAGES_PER_HOUR:
-        return False
-
-    sent_times.append(now)
-    return True
-
-# ====================== PHONE ======================
-def extract_phone(text):
-    match = re.search(r'(\+?\d[\d\-\s]{8,15}\d)', text)
-    return match.group(0) if match else "нет"
-
-# ====================== AI ======================
-async def ai_check(text):
-    if not ai_client.api_key:
-        log("⚠️ AI выключен")
-        return True
-
-    try:
-        res = await ai_client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": "Ответь ДА или НЕТ"},
-                {"role": "user", "content": text}
-            ],
-            max_tokens=5
-        )
-        answer = res.choices[0].message.content.upper()
-        log(f"🧠 AI ответ: {answer}")
-        return "ДА" in answer
-    except Exception as e:
-        log(f"❌ AI ошибка: {e}")
-        return False
-
-# ====================== CLIENT ======================
-init_db()
-
-client = TelegramClient(
-    StringSession(SESSION_STR),
-    API_ID,
-    API_HASH,
-    device_model="iPhone 13",
-    system_version="16.0",
-    app_version="9.0"
-)
-
 # ====================== HANDLER ======================
 @client.on(events.NewMessage(incoming=True))
 async def handler(event):
     try:
         uid = event.sender_id
-
         chat = await event.get_chat()
         chat_title = getattr(chat, 'title', 'PRIVATE')
-
         text = event.raw_text or ""
 
-        log(f"📩 MSG | chat: {chat_title} | user: {uid}")
-        log(f"💬 TEXT: {text}")
-
-        if not uid:
-            log("⛔ нет uid")
-            return
-
-        sender = await event.get_sender()
-
-        if getattr(sender, 'bot', False):
-            log("🤖 skip bot")
-            return
+        log(f"📩 MSG | {chat_title} | {uid}")
 
         if not event.is_group:
-            log("⏭️ skip private")
             return
 
-        text_lower = text.lower()
-
-        # стоп-слова
-        if any(sw in text_lower for sw in STOP_WORDS):
-            log("⛔ стоп-слово")
+        if not text:
             return
 
-        # триггер
-        trigger = next((w for w in TRIGGER_WORDS if w in text_lower), None)
-
-        if not trigger:
-            log("⏭️ нет триггера")
+        if "тест" not in text.lower():
             return
 
-        log(f"🎯 TRIGGER: {trigger}")
+        log("🎯 FOUND TEST MESSAGE")
 
-        # дубль
-        if get_status(uid):
-            log("🔁 уже есть в базе")
-            return
-
-        set_status(uid, "processing")
-
-        # AI
-        if not await ai_check(text):
-            log("❌ AI отказ")
-            set_status(uid, "rejected")
-            return
-
-        username = f"@{sender.username}" if sender.username else None
-
-        if not username:
-            log("⛔ нет username")
-            set_status(uid, "no_username")
-            return
-
-        # отчёт
-        report = (
-            f"🎯 ЛИД\n"
-            f"{RECRUITER_TAG}\n\n"
-            f"👤 {sender.first_name}\n"
-            f"🆔 {uid}\n"
-            f"🔗 {username}\n"
-            f"📞 {extract_phone(text)}\n"
-            f"🏠 {chat_title}\n\n"
-            f"{text[:200]}"
-        )
-
-        log("📤 отправка отчёта...")
-        await client.send_message(REPORT_CHAT_ID, report)
-
-        set_status(uid, "sent")
-
-        # антифлуд
-        if not can_send():
-            log("⛔ flood limit")
-            return
-
-        await asyncio.sleep(30)
-
-        await client.send_message(uid, "Здравствуйте! Актуально еще?")
-
-        log("💌 отправлено ЛС")
+        await client.send_message(REPORT_CHAT_ID, f"✅ Поймал сообщение:\n{text}")
 
     except Exception as e:
         log(f"❌ ERROR: {e}")
@@ -219,24 +93,57 @@ def health():
     server.serve_forever()
 
 # ====================== MAIN ======================
-async def main():
+async def run_bot():
+    global client
+
+    while True:
+        try:
+            log("🔌 Connecting...")
+
+            client = TelegramClient(
+                StringSession(SESSION_STR),
+                API_ID,
+                API_HASH,
+                device_model="iPhone 13",
+                system_version="16.0",
+                app_version="9.0",
+                connection_retries=None  # бесконечные попытки
+            )
+
+            await client.start()
+
+            me = await client.get_me()
+            log(f"🚀 Started: {me.first_name}")
+
+            # 🔔 УВЕДОМЛЕНИЕ О ЗАПУСКЕ
+            try:
+                await client.send_message(
+                    REPORT_CHAT_ID,
+                    f"🟢 Бот запущен\n👤 {me.first_name}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+                )
+            except Exception as e:
+                log(f"❌ Не смог отправить старт сообщение: {e}")
+
+            # прогрев
+            dialogs = await client.get_dialogs()
+            for d in dialogs[:10]:
+                log(f"👉 {d.name}")
+
+            log("✅ Listening...")
+
+            await client.run_until_disconnected()
+
+        except Exception as e:
+            log(f"❌ CONNECTION LOST: {e}")
+            log("🔄 Переподключение через 5 сек...")
+            await asyncio.sleep(5)
+
+# ====================== START ======================
+init_db()
+
+def main():
     threading.Thread(target=health, daemon=True).start()
+    asyncio.run(run_bot())
 
-    log("🔌 Connecting...")
-    await client.start()
-
-    me = await client.get_me()
-    log(f"🚀 Started: {me.first_name}")
-
-    log("📡 Загружаю диалоги...")
-    dialogs = await client.get_dialogs()
-
-    for d in dialogs[:20]:
-        log(f"👉 Диалог: {d.name}")
-
-    log("✅ Готов слушать сообщения...")
-
-    await client.run_until_disconnected()
-
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    main()
