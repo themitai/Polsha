@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, UserIsBlockedError, PeerIdInvalidError
+from telethon.errors import FloodWaitError, UserIsBlockedError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ========================= НОВЫЕ ДАННЫЕ =========================
+# ========================= КОНФИГУРАЦИЯ =========================
 API_ID = 35975193
 API_HASH = '5929ba2233799d47756cfee57b71c4a5'
 REPORT_CHAT_ID = 8748575384
@@ -23,15 +23,12 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
 
-# ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
     "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
-    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась", "освядчение",
-    "karta pobytu", "meldunek",
-    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку", "жилье посуточно",
-    "зніму квартиру", "шукаю житло",
+    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
+    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку",
     "ищу работу", "шукаю роботу", "подработка", "підробіток",
-    "детский сад", "садик", "школа для ребенка", "800+", "dobry start", "русскоговорящий врач"
+    "детский сад", "садик", "школа для ребенка", "800+", "dobry start"
 ]
 
 STOP_WORDS = ["ищем", "требуется", "вакансия", "набираем", "предлагаем", "услуги", "помогу"]
@@ -96,19 +93,7 @@ async def handler(event):
     text = event.raw_text.strip()
     text_lower = text.lower()
 
-    log(f"📨 Сообщение от {uid} | Текст: {text[:70]}...")
-
-    if event.is_private:
-        status = get_status(uid)
-        if status in ("sent", "offered"):
-            if await ai_check(text, "is_interest"):
-                if status == "sent":
-                    await event.reply("💼 У нас есть удалённая позиция в крипто-сфере. ЗП 2000€ + %. Подходит?")
-                    set_status(uid, "offered")
-                elif status == "offered":
-                    await event.reply(f"Отлично! Напишите куратору: {RECRUITER_TAG}")
-                    set_status(uid, "final")
-        return
+    log(f"📨 [ГРУППА] Сообщение от {uid} | Текст: {text[:70]}...")
 
     if not event.is_group:
         return
@@ -116,52 +101,53 @@ async def handler(event):
         return
 
     if any(word in text_lower for word in STOP_WORDS):
+        log("⛔ Стоп-слово найдено")
         return
 
     matched_trigger = next((word for word in TRIGGER_WORDS if word in text_lower), None)
 
     if matched_trigger and get_status(uid) is None:
-        if await ai_check(text, "is_lead"):
-            try:
-                # Улучшенное получение entity
-                user = await client.get_entity(uid)
-                input_peer = await client.get_input_entity(uid)
-                chat = await event.get_chat()
+        log(f"🔍 Найден триггер: '{matched_trigger}' — запускаем ИИ проверку")
 
-                username = f"@{user.username}" if user.username else "Нет username"
-                phone = getattr(user, 'phone', None) or "Скрыт"
+        if await ai_check(text, "is_lead"):
+            log(f"✅ ИИ одобрил лида {uid}. Готовим отчёт...")
+
+            try:
+                chat = await event.get_chat()
+                username = f"@{event.sender.username}" if event.sender.username else f"ID:{uid}"
                 user_link = f"tg://user?id={uid}"
 
                 report = (
                     f"🎯 **ЛИД НАЙДЕН**\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 Имя: {user.first_name or '—'}\n"
+                    f"👤 Имя: {event.sender.first_name or '—'}\n"
                     f"🆔 ID: `{uid}`\n"
-                    f"📱 Телефон: {phone}\n"
                     f"🔗 Прямая ссылка: [Открыть чат]({user_link})\n"
                     f"🏠 Группа: {chat.title}\n"
-                    f"💬 {text[:180]}\n"
+                    f"💬 {text[:200]}\n"
                     f"🔍 Триггер: {matched_trigger}"
                 )
 
+                # Отправляем отчёт
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
+                log(f"✅ Отчёт о лиде отправлен в REPORT_CHAT_ID ({REPORT_CHAT_ID})")
 
                 set_status(uid, "sent")
 
-                await asyncio.sleep(random.randint(50, 160))
+                await asyncio.sleep(random.randint(50, 140))
 
-                await client.send_message(input_peer, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
-                log(f"✅ Сообщение отправлено пользователю {uid} (триггер: {matched_trigger})")
+                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты.")
+                log(f"✅ Первое сообщение отправлено пользователю {uid}")
 
-            except FloodWaitError as e:
-                log(f"⏳ FloodWait: ждём {e.seconds} сек")
-                await asyncio.sleep(e.seconds)
-            except UserIsBlockedError:
-                log(f"⛔ Пользователь {uid} заблокировал бота")
-            except PeerIdInvalidError:
-                log(f"⚠️ PeerIdInvalid для пользователя {uid}")
             except Exception as e:
-                log(f"❌ Критическая ошибка при обработке лида {uid}: {e}")
+                log(f"❌ Ошибка при отправке отчёта или сообщения: {e}")
+        else:
+            log("🧠 ИИ отклонил лида")
+    else:
+        if not matched_trigger:
+            log("⚠️ Триггер не найден")
+        else:
+            log(f"⏭️ Пользователь {uid} уже обработан ранее")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -175,7 +161,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.4 — улучшена обработка entity")
+    log("🎯 Режим: Диагностика отправки отчётов v3.6")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
