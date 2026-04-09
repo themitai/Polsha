@@ -121,37 +121,43 @@ async def handler(event):
     if matched_trigger and get_status(uid) is None:
         if await ai_check(text, "is_lead"):
             try:
+                # Получаем информацию о пользователе
+                user = await client.get_entity(uid)
                 chat = await event.get_chat()
 
-                username = f"@{event.sender.username}" if event.sender.username else f"ID:{uid}"
+                username = f"@{user.username}" if user.username else "Нет username"
+                phone = getattr(user, 'phone', None) or "Скрыт"
                 user_link = f"tg://user?id={uid}"
 
                 report = (
                     f"🎯 **ЛИД НАЙДЕН**\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 Имя: {event.sender.first_name or '—'}\n"
+                    f"👤 Имя: {user.first_name or '—'}\n"
                     f"🆔 ID: `{uid}`\n"
-                    f"🔗 Прямая ссылка: [Открыть чат]({user_link})\n"
+                    f"📱 Телефон: {phone}\n"
+                    f"🔗 Прямая ссылка на профиль: [Открыть чат]({user_link})\n"
                     f"🏠 Группа: {chat.title}\n"
-                    f"💬 {text[:180]}\n"
+                    f"💬 Сообщение: {text[:200]}\n"
                     f"🔍 Триггер: {matched_trigger}"
                 )
 
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
+                log(f"✅ Отчёт о лиде отправлен в REPORT_CHAT_ID")
 
                 set_status(uid, "sent")
 
-                # Улучшенная отправка сообщения
-                await asyncio.sleep(random.randint(45, 130))
+                await asyncio.sleep(random.randint(50, 160))
 
-                try:
-                    await client.send_message(uid, "Здравствуйте! Видела ваше сообщение про пеший переход. Могу подсказать варианты.")
-                    log(f"✅ Сообщение успешно отправлено пользователю {uid}")
-                except Exception as send_error:
-                    log(f"⚠️ Не удалось отправить сообщение {uid}: {send_error}")
+                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
+                log(f"✅ Первое сообщение отправлено пользователю {uid}")
 
+            except FloodWaitError as e:
+                log(f"⏳ FloodWait: ждём {e.seconds} сек")
+                await asyncio.sleep(e.seconds)
+            except UserIsBlockedError:
+                log(f"⛔ Пользователь {uid} заблокировал бота")
             except Exception as e:
-                log(f"❌ Общая ошибка при обработке лида {uid}: {e}")
+                log(f"❌ Ошибка при обработке лида {uid}: {e}")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -165,7 +171,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.5 — финальная версия отправки")
+    log("🎯 Режим: Lead Generator v3.7 — с прямой ссылкой и телефоном")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
