@@ -11,7 +11,7 @@ from telethon.errors import FloodWaitError, UserIsBlockedError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ========================= КОНФИГУРАЦИЯ =========================
+# ========================= ТВОИ ДАННЫЕ =========================
 API_ID = 34278859
 API_HASH = '7bd3351d245de7b793653188d915e147'
 REPORT_CHAT_ID = 8285184221
@@ -75,8 +75,10 @@ async def ai_check(text, mode="is_lead"):
             temperature=0
         )
         answer = res.choices[0].message.content.strip().upper()
+        log(f"🧠 ИИ [{mode}]: {answer}")
         return "ДА" in answer
-    except:
+    except Exception as e:
+        log(f"❌ Ошибка ИИ: {e}")
         return False
 
 # ====================== ОБРАБОТЧИК ======================
@@ -92,6 +94,20 @@ async def handler(event):
     text = event.raw_text.strip()
     text_lower = text.lower()
 
+    log(f"📨 Сообщение от {uid} | Текст: {text[:70]}...")
+
+    if event.is_private:
+        status = get_status(uid)
+        if status in ("sent", "offered"):
+            if await ai_check(text, "is_interest"):
+                if status == "sent":
+                    await event.reply("💼 У нас есть удалённая позиция в крипто-сфере. ЗП 2000€ + %. Подходит?")
+                    set_status(uid, "offered")
+                elif status == "offered":
+                    await event.reply(f"Отлично! Напишите куратору: {RECRUITER_TAG}")
+                    set_status(uid, "final")
+        return
+
     if not event.is_group:
         return
     if (datetime.now(timezone.utc) - event.date).total_seconds() > 600:
@@ -105,42 +121,41 @@ async def handler(event):
     if matched_trigger and get_status(uid) is None:
         if await ai_check(text, "is_lead"):
             try:
+                # Получаем информацию о пользователе
                 user = await client.get_entity(uid)
                 chat = await event.get_chat()
 
-                # Ссылки
-                profile_link = f"tg://user?id={uid}"
-                message_link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}"
-
-                # Телефон
-                phone_profile = getattr(user, 'phone', None) or "Не указан"
-                phone_in_text = "Не указан"  # можно добавить поиск телефона в тексте позже
+                username = f"@{user.username}" if user.username else "Нет username"
+                phone = getattr(user, 'phone', None) or "Скрыт"
+                user_link = f"tg://user?id={uid}"
 
                 report = (
-                    f"🔴 **НОВЫЙ ЛИД ОБНАРУЖЕН**\n"
+                    f"🎯 **ЛИД НАЙДЕН**\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"👤 Имя: {user.first_name or '—'}\n"
                     f"🆔 ID: `{uid}`\n"
-                    f"📱 Телефон в профиле: {phone_profile}\n"
-                    f"📱 Телефон в тексте: {phone_in_text}\n"
-                    f"🔗 Прямая ссылка на профиль: [Перейти в ЛС]({profile_link})\n"
-                    f"🔗 Ссылка на сообщение: [Открыть сообщение]({message_link})\n"
+                    f"📱 Телефон: {phone}\n"
+                    f"🔗 Прямая ссылка на профиль: [Открыть чат]({user_link})\n"
                     f"🏠 Группа: {chat.title}\n"
-                    f"💬 Сообщение:\n{text[:300]}{'...' if len(text) > 300 else ''}\n"
-                    f"🔍 Триггер: {matched_trigger}\n"
-                    f"━━━━━━━━━━━━━━━━━━"
+                    f"💬 Сообщение: {text[:200]}\n"
+                    f"🔍 Триггер: {matched_trigger}"
                 )
 
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
-                log(f"✅ Отчёт о лиде отправлен (ID: {uid})")
+                log(f"✅ Отчёт о лиде отправлен в REPORT_CHAT_ID")
 
                 set_status(uid, "sent")
 
                 await asyncio.sleep(random.randint(50, 160))
 
                 await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
-                log(f"✅ Первое сообщение отправлено {uid}")
+                log(f"✅ Первое сообщение отправлено пользователю {uid}")
 
+            except FloodWaitError as e:
+                log(f"⏳ FloodWait: ждём {e.seconds} сек")
+                await asyncio.sleep(e.seconds)
+            except UserIsBlockedError:
+                log(f"⛔ Пользователь {uid} заблокировал бота")
             except Exception as e:
                 log(f"❌ Ошибка при обработке лида {uid}: {e}")
 
@@ -156,7 +171,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.8 — расширенный отчёт о лиде")
+    log("🎯 Режим: Lead Generator v3.7 — с прямой ссылкой и телефоном")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
