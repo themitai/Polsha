@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, UserIsBlockedError
+from telethon.errors import FloodWaitError, UserIsBlockedError, PeerIdInvalidError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -23,7 +23,6 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
 
-# ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
     "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
     "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
@@ -121,14 +120,14 @@ async def handler(event):
     if matched_trigger and get_status(uid) is None:
         if await ai_check(text, "is_lead"):
             try:
-                # ← КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ
+                # ← УЛУЧШЕННОЕ ПОЛУЧЕНИЕ ENTITY
+                user = await client.get_entity(uid)
                 input_peer = await client.get_input_entity(uid)
                 chat = await event.get_chat()
-                user = await client.get_entity(uid)
 
-                username = f"@{user.username}" if user.username else f"ID:{uid}"
+                username = f"@{user.username}" if user.username else "Нет username"
+                phone = getattr(user, 'phone', None) or "Скрыт"
                 user_link = f"tg://user?id={uid}"
-                phone = user.phone if hasattr(user, 'phone') and user.phone else "Скрыт"
 
                 report = (
                     f"🎯 **ЛИД НАЙДЕН**\n"
@@ -146,18 +145,20 @@ async def handler(event):
 
                 set_status(uid, "sent")
 
-                await asyncio.sleep(random.randint(50, 140))
+                await asyncio.sleep(random.randint(50, 160))
 
-                await client.send_message(input_peer, "Здравствуйте! Видела ваше сообщение про пеший переход. Могу подсказать варианты.")
-                log(f"✅ Сообщение отправлено → {uid} (триггер: {matched_trigger})")
+                await client.send_message(input_peer, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
+                log(f"✅ Сообщение успешно отправлено пользователю {uid}")
 
             except FloodWaitError as e:
                 log(f"⏳ FloodWait: ждём {e.seconds} сек")
                 await asyncio.sleep(e.seconds)
             except UserIsBlockedError:
                 log(f"⛔ Пользователь {uid} заблокировал бота")
+            except PeerIdInvalidError:
+                log(f"⚠️ Не удалось получить entity для пользователя {uid} (PeerIdInvalid)")
             except Exception as e:
-                log(f"❌ Ошибка при обработке лида {uid}: {type(e).__name__} - {e}")
+                log(f"❌ Неизвестная ошибка при обработке лида {uid}: {e}")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -171,7 +172,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.3 — исправлена отправка сообщений")
+    log("🎯 Режим: Lead Generator v3.3 — улучшена отправка сообщений")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
