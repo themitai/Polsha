@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, UserIsBlockedError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -26,12 +26,10 @@ DB_PATH = "leads_v3.db"
 # ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
     "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
-    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась", "освядчение",
-    "karta pobytu", "meldunek",
-    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку", "жилье посуточно",
-    "зніму квартиру", "шукаю житло",
+    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
+    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку",
     "ищу работу", "шукаю роботу", "подработка", "підробіток",
-    "детский сад", "садик", "школа для ребенка", "800+", "dobry start", "русскоговорящий врач"
+    "детский сад", "садик", "школа для ребенка", "800+", "dobry start"
 ]
 
 STOP_WORDS = ["ищем", "требуется", "вакансия", "набираем", "предлагаем", "услуги", "помогу"]
@@ -96,13 +94,11 @@ async def handler(event):
     text = event.raw_text.strip()
     text_lower = text.lower()
 
-    log(f"📨 Сообщение от {uid} | Длина: {len(text)} | Текст: {text[:70]}...")
+    log(f"📨 Сообщение от {uid} | Текст: {text[:80]}...")
 
-    # Личные сообщения
     if event.is_private:
         status = get_status(uid)
         if status in ("sent", "offered"):
-            log(f"📩 ЛС от {uid} | статус = {status}")
             if await ai_check(text, "is_interest"):
                 if status == "sent":
                     await event.reply("💼 У нас есть удалённая позиция в крипто-сфере. ЗП 2000€ + %. Подходит?")
@@ -112,35 +108,27 @@ async def handler(event):
                     set_status(uid, "final")
         return
 
-    # Группы
     if not event.is_group:
         return
     if (datetime.now(timezone.utc) - event.date).total_seconds() > 600:
         return
 
     if any(word in text_lower for word in STOP_WORDS):
-        log("⛔️ Найдено стоп-слово, пропускаем")
         return
 
-    # Проверка триггеров
-    matched_trigger = None
-    for word in TRIGGER_WORDS:
-        if word in text_lower:
-            matched_trigger = word
-            break
+    matched_trigger = next((word for word in TRIGGER_WORDS if word in text_lower), None)
 
     if matched_trigger and get_status(uid) is None:
         if await ai_check(text, "is_lead"):
             try:
-                # Получаем полную информацию о пользователе
-                user = await client.get_entity(uid)
+                # ← КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ
+                input_peer = await client.get_input_entity(uid)
                 chat = await event.get_chat()
+                user = await client.get_entity(uid)
 
-                username = f"@{user.username}" if user.username else "Нет username"
-                phone = user.phone if hasattr(user, 'phone') and user.phone else "Скрыт"
-
-                # Прямая ссылка на профиль
+                username = f"@{user.username}" if user.username else f"ID:{uid}"
                 user_link = f"tg://user?id={uid}"
+                phone = user.phone if hasattr(user, 'phone') and user.phone else "Скрыт"
 
                 report = (
                     f"🎯 **ЛИД НАЙДЕН**\n"
@@ -148,25 +136,28 @@ async def handler(event):
                     f"👤 Имя: {user.first_name or '—'}\n"
                     f"🆔 ID: `{uid}`\n"
                     f"📱 Телефон: {phone}\n"
-                    f"🔗 Прямая ссылка: [Открыть профиль]({user_link})\n"
+                    f"🔗 Прямая ссылка: [Открыть чат]({user_link})\n"
                     f"🏠 Группа: {chat.title}\n"
-                    f"💬 Сообщение: {text[:180]}\n"
-                    f"🔍 Триггер: {matched_trigger}\n"
-                    f"━━━━━━━━━━━━━━━━━━"
+                    f"💬 {text[:180]}\n"
+                    f"🔍 Триггер: {matched_trigger}"
                 )
 
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
 
                 set_status(uid, "sent")
-                await asyncio.sleep(random.randint(50, 160))
 
-                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
+                await asyncio.sleep(random.randint(50, 140))
+
+                await client.send_message(input_peer, "Здравствуйте! Видела ваше сообщение про пеший переход. Могу подсказать варианты.")
                 log(f"✅ Сообщение отправлено → {uid} (триггер: {matched_trigger})")
 
+            except FloodWaitError as e:
+                log(f"⏳ FloodWait: ждём {e.seconds} сек")
+                await asyncio.sleep(e.seconds)
+            except UserIsBlockedError:
+                log(f"⛔ Пользователь {uid} заблокировал бота")
             except Exception as e:
-                log(f"❌ Ошибка при обработке лида {uid}: {e}")
-        else:
-            log("🧠 ИИ отклонил лида")
+                log(f"❌ Ошибка при обработке лида {uid}: {type(e).__name__} - {e}")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -180,7 +171,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.2 — с прямой ссылкой и телефоном")
+    log("🎯 Режим: Lead Generator v3.3 — исправлена отправка сообщений")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
