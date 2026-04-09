@@ -3,205 +3,170 @@ import os
 import sqlite3
 import random
 import threading
-import re
 from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import User
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, UserIsBlockedError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- КОНФИГУРАЦИЯ ---
+# ========================= ТВОИ ДАННЫЕ =========================
 API_ID = 34278859
 API_HASH = '7bd3351d245de7b793653188d915e147'
 REPORT_CHAT_ID = 8285184221
 RECRUITER_TAG = "@HRivan2"
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSION_STR = os.getenv("TELEGRAM_SESSION")
 
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-DB_PATH = "is_seeker_v11.db"
+DB_PATH = "leads_v3.db"
 
-# --- ВАРИАНТЫ ПЕРВОГО СООБЩЕНИЯ ---
-FIRST_MESSAGES = [
-    "Здравствуйте! Увидела ваше сообщение в группе по поводу поиска работы. У нас сейчас открыта удаленная вакансия (крипто-сфера). Вам было бы интересно узнать подробности?",
-    "Добрый день! Заметила ваш пост в чате, что вы ищете работу. Подскажите, рассматриваете удаленку в крипто-проекте? Могу рассказать детали.",
-    "Приветствую! Наткнулась на ваше объявление в группе. Мы как раз ищем людей на удаленную позицию в крипто-направлении. Хотели бы ознакомиться с условиями?",
-    "Здравствуйте! Вы писали в группе, что ищете работу. У нас есть предложение по удаленному сотрудничеству (крипто). Если актуально, могу скинуть подробности."
+# ====================== ТРИГГЕРЫ ======================
+TRIGGER_WORDS = [
+    "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
+    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
+    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку",
+    "ищу работу", "шукаю роботу", "подработка", "підробіток",
+    "детский сад", "садик", "школа для ребенка", "800+", "dobry start"
 ]
+
+STOP_WORDS = ["ищем", "требуется", "вакансия", "набираем", "предлагаем", "услуги", "помогу"]
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# Функция для поиска номера телефона в тексте
-def extract_phone(text):
-    phone_pattern = r'\+?\d{9,15}'
-    match = re.search(phone_pattern, text)
-    return match.group(0) if match else "Не указан"
-
-# --- HEALTH SERVER ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args): return
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
-
-# --- БАЗА ДАННЫХ ---
+# ====================== БАЗА ======================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT)')
+    conn.execute('CREATE TABLE IF NOT EXISTS leads (user_id INTEGER PRIMARY KEY, status TEXT, category TEXT)')
     conn.close()
-    log("📂 База данных инициализирована.")
 
 def get_status(user_id):
     try:
         conn = sqlite3.connect(DB_PATH)
-        row = conn.execute("SELECT status FROM users WHERE user_id=?", (user_id,)).fetchone()
+        row = conn.execute("SELECT status FROM leads WHERE user_id=?", (user_id,)).fetchone()
         conn.close()
         return row[0] if row else None
-    except Exception as e:
-        log(f"❌ Ошибка при чтении БД: {e}")
+    except:
         return None
 
-def set_status(user_id, status):
+def set_status(user_id, status, category="unknown"):
     try:
         conn = sqlite3.connect(DB_PATH)
-        conn.execute("INSERT OR REPLACE INTO users (user_id, status) VALUES (?, ?)", (user_id, status))
+        conn.execute("INSERT OR REPLACE INTO leads (user_id, status, category) VALUES (?, ?, ?)",
+                     (user_id, status, category))
         conn.commit()
         conn.close()
-        log(f"💾 Статус пользователя {user_id} обновлен на: {status}")
-    except Exception as e:
-        log(f"❌ Ошибка записи в БД: {e}")
+    except:
+        pass
 
-# --- ИИ МОЗГ ---
-async def ai_check(text, mode="is_seeker"):
-    if not text or len(text) < 2: return False
-    label = "ПОИСК ЛИДА" if mode == "is_seeker" else "АНАЛИЗ ИНТЕРЕСА"
+# ====================== ИИ ======================
+async def ai_check(text, mode="is_lead"):
+    if not ai_client:
+        return True
     try:
-        if mode == "is_seeker":
-            sys_prompt = "Ты HR. Ответь ДА, только если человек САМ ищет работу. НЕТ — если это вакансия, реклама услуг или спам."
-        else:
-            sys_prompt = "Клиент заинтересован в предложении? Ответь ДА или НЕТ."
-
+        prompt = "Ответь ТОЛЬКО ДА или НЕТ. ДА — если человек ищет помощь (жильё, работа, документы, переезд и т.д.)"
         res = await ai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
-            max_tokens=5, temperature=0
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
+            max_tokens=5,
+            temperature=0
         )
-        ans = res.choices[0].message.content.strip().upper()
-        return "ДА" in ans
+        answer = res.choices[0].message.content.strip().upper()
+        log(f"🧠 ИИ [{mode}]: {answer}")
+        return "ДА" in answer
     except Exception as e:
         log(f"❌ Ошибка ИИ: {e}")
         return False
 
-# --- ОБРАБОТЧИК ---
+# ====================== ОБРАБОТЧИК ======================
 init_db()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 @client.on(events.NewMessage)
 async def handler(event):
-    if not event.sender_id: return
-    is_bot = getattr(event.sender, 'bot', False) if hasattr(event.sender, 'bot') else False
-    if not isinstance(event.sender, User) or is_bot: return
+    if not event.sender_id or getattr(event.sender, 'bot', False):
+        return
 
     uid = event.sender_id
     text = event.raw_text.strip()
-    
-    # 1. ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ (ДОЖИМ)
+    text_lower = text.lower()
+
+    log(f"📨 Сообщение от {uid} | Текст: {text[:70]}...")
+
     if event.is_private:
         status = get_status(uid)
         if status in ("sent", "offered"):
             if await ai_check(text, "is_interest"):
-                await asyncio.sleep(random.randint(5, 12))
-                try:
-                    if status == "sent":
-                        await event.reply("💼 **Условия:** Удаленно (крипто). ЗП 2000€ + %. Подходит?")
-                        set_status(uid, "offered")
-                    elif status == "offered":
-                        await event.reply(f"Напишите куратору: {RECRUITER_TAG}")
-                        set_status(uid, "final")
-                        await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ДОЖАТ!**\n👤 ID: {uid}\n🔗 [ПЕРЕЙТИ К ДИАЛОГУ](tg://user?id={uid})", link_preview=False)
-                except Exception as e:
-                    log(f"❌ Ошибка в ЛС: {e}")
+                if status == "sent":
+                    await event.reply("💼 У нас есть удалённая позиция в крипто-сфере. ЗП 2000€ + %. Подходит?")
+                    set_status(uid, "offered")
+                elif status == "offered":
+                    await event.reply(f"Отлично! Напишите куратору: {RECRUITER_TAG}")
+                    set_status(uid, "final")
         return
 
-    # 2. ОБРАБОТКА ГРУПП (ПОИСК)
-    if event.is_group:
-        if (datetime.now(timezone.utc) - event.date).total_seconds() > 600: return
-        
-        status = get_status(uid)
-        if status is not None: return
+    if not event.is_group:
+        return
+    if (datetime.now(timezone.utc) - event.date).total_seconds() > 600:
+        return
 
-        if await ai_check(text, "is_seeker"):
+    if any(word in text_lower for word in STOP_WORDS):
+        return
+
+    matched_trigger = next((word for word in TRIGGER_WORDS if word in text_lower), None)
+
+    if matched_trigger and get_status(uid) is None:
+        if await ai_check(text, "is_lead"):
             try:
                 chat = await event.get_chat()
-                group_name = chat.title
-                username = f"@{event.sender.username}" if event.sender.username else "Нет юзернейма"
-                user_url = f"tg://user?id={uid}"
-                phone_num = extract_phone(text)
-                profile_phone = getattr(event.sender, 'phone', 'Скрыт')
 
-                # Формирование ссылки на сообщение
-                msg_id = event.id
-                chat_id_str = str(event.chat_id).replace("-100", "")
-                if hasattr(chat, 'username') and chat.username:
-                    msg_link = f"https://t.me/{chat.username}/{msg_id}"
-                else:
-                    msg_link = f"https://t.me/c/{chat_id_str}/{msg_id}"
+                username = f"@{event.sender.username}" if event.sender.username else f"ID:{uid}"
+                user_link = f"tg://user?id={uid}"
 
-                log(f"🎯 ЛИД: {username} в '{group_name}'")
-
-                # Отчет в чат-репорт
-                report_text = (
-                    f"🎯 **НОВЫЙ ЛИД ОБНАРУЖЕН**\n"
+                report = (
+                    f"🎯 **ЛИД НАЙДЕН**\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 **Имя:** {event.sender.first_name or 'User'}\n"
-                    f"🆔 **Аккаунт:** {username}\n"
-                    f"📱 **Тел. в тексте:** `{phone_num}`\n"
-                    f"📞 **Тел. в профиле:** `{profile_phone}`\n"
-                    f"🏢 **Группа:** {group_name}\n"
-                    f"📝 **Сообщение:** \n_{text}_\n\n"
-                    f"🔗 [ПЕРЕЙТИ В ЛС (tg:// ссылка)]({user_url})\n"
-                    f"🔗 [ССЫЛКА НА СООБЩЕНИЕ]({msg_link})"
+                    f"👤 Имя: {event.sender.first_name or '—'}\n"
+                    f"🆔 ID: `{uid}`\n"
+                    f"🔗 Прямая ссылка: [Открыть чат]({user_link})\n"
+                    f"🏠 Группа: {chat.title}\n"
+                    f"💬 {text[:180]}\n"
+                    f"🔍 Триггер: {matched_trigger}"
                 )
-                
-                await client.send_message(REPORT_CHAT_ID, report_text, link_preview=False)
+
+                await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
+
                 set_status(uid, "sent")
 
-                # Имитация человеческой задержки
-                delay = random.randint(90, 210)
-                log(f"⏳ Пауза {delay} сек перед отправкой в ЛС...")
-                await asyncio.sleep(delay)
+                # Улучшенная отправка сообщения
+                await asyncio.sleep(random.randint(45, 130))
 
-                # Отправка первого сообщения
-                chosen_msg = random.choice(FIRST_MESSAGES)
-                await client.send_message(uid, chosen_msg)
-                log(f"✅ Первое сообщение отправлено к {uid}")
+                try:
+                    await client.send_message(uid, "Здравствуйте! Видела ваше сообщение про пеший переход. Могу подсказать варианты.")
+                    log(f"✅ Сообщение успешно отправлено пользователю {uid}")
+                except Exception as send_error:
+                    log(f"⚠️ Не удалось отправить сообщение {uid}: {send_error}")
 
-            except FloodWaitError as e:
-                log(f"⏳ FloodWait: ждем {e.seconds} сек.")
-                await asyncio.sleep(e.seconds)
             except Exception as e:
-                log(f"❌ Ошибка: {e}")
+                log(f"❌ Общая ошибка при обработке лида {uid}: {e}")
 
+# ====================== ЗАПУСК ======================
 async def main():
-    threading.Thread(target=run_health_server, daemon=True).start()
-    log("🔌 Подключение...")
+    def health():
+        port = int(os.getenv("PORT", 8080))
+        server = HTTPServer(('0.0.0.0', port),
+            type('H', (BaseHTTPRequestHandler,), {'do_GET': lambda s: (s.send_response(200), s.end_headers(), s.wfile.write(b"OK"))}))
+        server.serve_forever()
+    threading.Thread(target=health, daemon=True).start()
+
     await client.start()
     me = await client.get_me()
-    log(f"🚀 ЗАПУЩЕНО на {me.first_name}. Мониторинг групп...")
+    log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
+    log("🎯 Режим: Lead Generator v3.5 — финальная версия отправки")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log("👋 Остановлен.")
+    asyncio.run(main())
