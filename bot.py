@@ -14,10 +14,10 @@ from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # --- КОНФИГУРАЦИЯ ---
-API_ID = 35975193
-API_HASH = '5929ba2233799d47756cfee57b71c4a5'
-REPORT_CHAT_ID = 8748575384
-RECRUITER_TAG = "@HRpolsha"
+API_ID = 34278859
+API_HASH = '7bd3351d245de7b793653188d915e147'
+REPORT_CHAT_ID = 8285184221
+RECRUITER_TAG = "@HRivan2"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SESSION_STR = os.getenv("TELEGRAM_SESSION")
 
