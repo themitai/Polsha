@@ -11,7 +11,7 @@ from telethon.errors import FloodWaitError, UserIsBlockedError, PeerIdInvalidErr
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ========================= КОНФИГУРАЦИЯ =========================
+# ========================= НОВЫЕ ДАННЫЕ =========================
 API_ID = 35975193
 API_HASH = '5929ba2233799d47756cfee57b71c4a5'
 REPORT_CHAT_ID = 8748575384
@@ -23,12 +23,15 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
 
+# ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
     "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
-    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
-    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку",
+    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась", "освядчение",
+    "karta pobytu", "meldunek",
+    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку", "жилье посуточно",
+    "зніму квартиру", "шукаю житло",
     "ищу работу", "шукаю роботу", "подработка", "підробіток",
-    "детский сад", "садик", "школа для ребенка", "800+", "dobry start"
+    "детский сад", "садик", "школа для ребенка", "800+", "dobry start", "русскоговорящий врач"
 ]
 
 STOP_WORDS = ["ищем", "требуется", "вакансия", "набираем", "предлагаем", "услуги", "помогу"]
@@ -93,7 +96,7 @@ async def handler(event):
     text = event.raw_text.strip()
     text_lower = text.lower()
 
-    log(f"📨 Сообщение от {uid} | Текст: {text[:80]}...")
+    log(f"📨 Сообщение от {uid} | Текст: {text[:70]}...")
 
     if event.is_private:
         status = get_status(uid)
@@ -120,7 +123,7 @@ async def handler(event):
     if matched_trigger and get_status(uid) is None:
         if await ai_check(text, "is_lead"):
             try:
-                # ← УЛУЧШЕННОЕ ПОЛУЧЕНИЕ ENTITY
+                # Улучшенное получение entity
                 user = await client.get_entity(uid)
                 input_peer = await client.get_input_entity(uid)
                 chat = await event.get_chat()
@@ -148,7 +151,7 @@ async def handler(event):
                 await asyncio.sleep(random.randint(50, 160))
 
                 await client.send_message(input_peer, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
-                log(f"✅ Сообщение успешно отправлено пользователю {uid}")
+                log(f"✅ Сообщение отправлено пользователю {uid} (триггер: {matched_trigger})")
 
             except FloodWaitError as e:
                 log(f"⏳ FloodWait: ждём {e.seconds} сек")
@@ -156,9 +159,9 @@ async def handler(event):
             except UserIsBlockedError:
                 log(f"⛔ Пользователь {uid} заблокировал бота")
             except PeerIdInvalidError:
-                log(f"⚠️ Не удалось получить entity для пользователя {uid} (PeerIdInvalid)")
+                log(f"⚠️ PeerIdInvalid для пользователя {uid}")
             except Exception as e:
-                log(f"❌ Неизвестная ошибка при обработке лида {uid}: {e}")
+                log(f"❌ Критическая ошибка при обработке лида {uid}: {e}")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -172,7 +175,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.3 — улучшена отправка сообщений")
+    log("🎯 Режим: Lead Generator v3.4 — улучшена обработка entity")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
