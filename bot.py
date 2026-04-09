@@ -11,7 +11,7 @@ from telethon.errors import FloodWaitError, UserIsBlockedError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ========================= КОНФИГУРАЦИЯ =========================
+# ========================= ТВОИ ДАННЫЕ =========================
 API_ID = 35975193
 API_HASH = '5929ba2233799d47756cfee57b71c4a5'
 REPORT_CHAT_ID = 8748575384
@@ -93,7 +93,19 @@ async def handler(event):
     text = event.raw_text.strip()
     text_lower = text.lower()
 
-    log(f"📨 [ГРУППА] Сообщение от {uid} | Текст: {text[:70]}...")
+    log(f"📨 Сообщение от {uid} | Текст: {text[:70]}...")
+
+    if event.is_private:
+        status = get_status(uid)
+        if status in ("sent", "offered"):
+            if await ai_check(text, "is_interest"):
+                if status == "sent":
+                    await event.reply("💼 У нас есть удалённая позиция в крипто-сфере. ЗП 2000€ + %. Подходит?")
+                    set_status(uid, "offered")
+                elif status == "offered":
+                    await event.reply(f"Отлично! Напишите куратору: {RECRUITER_TAG}")
+                    set_status(uid, "final")
+        return
 
     if not event.is_group:
         return
@@ -101,16 +113,13 @@ async def handler(event):
         return
 
     if any(word in text_lower for word in STOP_WORDS):
-        log("⛔ Стоп-слово найдено")
         return
 
     matched_trigger = next((word for word in TRIGGER_WORDS if word in text_lower), None)
 
     if matched_trigger and get_status(uid) is None:
-        log(f"🔍 Найден триггер: '{matched_trigger}' — запускаем ИИ проверку")
-
         if await ai_check(text, "is_lead"):
-            log(f"✅ ИИ одобрил лида {uid}. Готовим отчёт...")
+            log(f"✅ ИИ одобрил лида {uid}. Отправляем отчёт...")
 
             try:
                 chat = await event.get_chat()
@@ -124,30 +133,29 @@ async def handler(event):
                     f"🆔 ID: `{uid}`\n"
                     f"🔗 Прямая ссылка: [Открыть чат]({user_link})\n"
                     f"🏠 Группа: {chat.title}\n"
-                    f"💬 {text[:200]}\n"
+                    f"💬 {text[:180]}\n"
                     f"🔍 Триггер: {matched_trigger}"
                 )
 
-                # Отправляем отчёт
+                # Отправка отчёта
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
-                log(f"✅ Отчёт о лиде отправлен в REPORT_CHAT_ID ({REPORT_CHAT_ID})")
+                log(f"✅ Отчёт отправлен в REPORT_CHAT_ID")
 
                 set_status(uid, "sent")
 
-                await asyncio.sleep(random.randint(50, 140))
+                # Отправка сообщения пользователю с повторной попыткой
+                await asyncio.sleep(random.randint(45, 130))
 
-                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты.")
-                log(f"✅ Первое сообщение отправлено пользователю {uid}")
+                try:
+                    await client.send_message(uid, "Здравствуйте! Видела ваше сообщение про пеший переход. Могу подсказать варианты.")
+                    log(f"✅ Первое сообщение отправлено пользователю {uid}")
+                except Exception as send_err:
+                    log(f"⚠️ Не удалось отправить сообщение пользователю {uid}: {send_err}")
 
             except Exception as e:
-                log(f"❌ Ошибка при отправке отчёта или сообщения: {e}")
+                log(f"❌ Ошибка при обработке лида {uid}: {e}")
         else:
             log("🧠 ИИ отклонил лида")
-    else:
-        if not matched_trigger:
-            log("⚠️ Триггер не найден")
-        else:
-            log(f"⏭️ Пользователь {uid} уже обработан ранее")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -161,7 +169,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Диагностика отправки отчётов v3.6")
+    log("🎯 Режим: Lead Generator v3.7 — стабильная отправка")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
