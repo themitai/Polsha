@@ -12,7 +12,7 @@ from telethon.sessions import StringSession
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ========================= КОНФИГУРАЦИЯ =========================
+# ========================= КОНФИГ =========================
 API_ID = 35975193
 API_HASH = '5929ba2233799d47756cfee57b71c4a5'
 
@@ -25,67 +25,38 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
 
+TRIGGER_WORDS = ["тест", "test", "ищу работу", "ищу жилье"]
+STOP_WORDS = ["вакансия", "набираем"]
+
 MAX_MESSAGES_PER_HOUR = 15
+sent_times = []
 
-TRIGGER_WORDS = [
-    "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
-    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
-    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку",
-    "ищу работу", "шукаю роботу", "подработка", "підробіток",
-    "детский сад", "садик", "школа для ребенка", "800+", "dobry start",
-    "тест", "test"
-]
-
-STOP_WORDS = [
-    "ищем", "требуется", "вакансия", "набираем", "предлагаем",
-    "услуги", "помогу", "работа для", "заработок", "приглашаем",
-    "оформление", "официально"
-]
-
-# ====================== ЛОГ ======================
+# ====================== LOG ======================
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ====================== PHONE ======================
-def extract_phone(text):
-    pattern = r'(\+?\d[\d\-\s]{8,15}\d)'
-    match = re.search(pattern, text)
-    return match.group(0) if match else "Не указан"
-
-# ====================== БАЗА ======================
+# ====================== DB ======================
 def db():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
     conn = db()
-    conn.execute('CREATE TABLE IF NOT EXISTS leads (user_id INTEGER PRIMARY KEY, status TEXT, category TEXT)')
+    conn.execute('CREATE TABLE IF NOT EXISTS leads (user_id INTEGER PRIMARY KEY, status TEXT)')
     conn.close()
 
 def get_status(user_id):
-    try:
-        conn = db()
-        row = conn.execute("SELECT status FROM leads WHERE user_id=?", (user_id,)).fetchone()
-        conn.close()
-        return row[0] if row else None
-    except Exception as e:
-        log(f"❌ DB get_status: {e}")
-        return None
+    conn = db()
+    row = conn.execute("SELECT status FROM leads WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    return row[0] if row else None
 
-def set_status(user_id, status, category="unknown"):
-    try:
-        conn = db()
-        conn.execute(
-            "INSERT OR REPLACE INTO leads (user_id, status, category) VALUES (?, ?, ?)",
-            (user_id, status, category)
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        log(f"❌ DB set_status: {e}")
+def set_status(user_id, status):
+    conn = db()
+    conn.execute("INSERT OR REPLACE INTO leads (user_id, status) VALUES (?, ?)", (user_id, status))
+    conn.commit()
+    conn.close()
 
 # ====================== АНТИ-ФЛУД ======================
-sent_times = []
-
 def can_send():
     now = time.time()
     global sent_times
@@ -98,123 +69,139 @@ def can_send():
     sent_times.append(now)
     return True
 
-# ====================== ИИ ======================
+# ====================== PHONE ======================
+def extract_phone(text):
+    match = re.search(r'(\+?\d[\d\-\s]{8,15}\d)', text)
+    return match.group(0) if match else "нет"
+
+# ====================== AI ======================
 async def ai_check(text):
     if not ai_client.api_key:
+        log("⚠️ AI выключен")
         return True
 
     try:
-        prompt = "Ответь ТОЛЬКО 'ДА' или 'НЕТ'. 'ДА' — если человек ищет помощь/жилье/работу. 'НЕТ' — если реклама."
-
         res = await ai_client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[
-                {"role": "system", "content": prompt},
+                {"role": "system", "content": "Ответь ДА или НЕТ"},
                 {"role": "user", "content": text}
             ],
-            max_tokens=5,
-            temperature=0
+            max_tokens=5
         )
-
-        answer = res.choices[0].message.content.strip().upper()
-        log(f"🧠 AI: {answer}")
+        answer = res.choices[0].message.content.upper()
+        log(f"🧠 AI ответ: {answer}")
         return "ДА" in answer
-
     except Exception as e:
-        log(f"❌ AI error: {e}")
+        log(f"❌ AI ошибка: {e}")
         return False
 
-# ====================== ОБРАБОТЧИК ======================
+# ====================== CLIENT ======================
 init_db()
-client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
-@client.on(events.NewMessage)
+client = TelegramClient(
+    StringSession(SESSION_STR),
+    API_ID,
+    API_HASH,
+    device_model="iPhone 13",
+    system_version="16.0",
+    app_version="9.0"
+)
+
+# ====================== HANDLER ======================
+@client.on(events.NewMessage(incoming=True))
 async def handler(event):
-    uid = event.sender_id
-    if not uid:
-        return
-
-    sender = await event.get_sender()
-    if getattr(sender, 'bot', False):
-        return
-
-    if not event.is_group:
-        return
-
-    chat = await event.get_chat()
-
-    msg_age = (datetime.now(timezone.utc) - event.date).total_seconds()
-    if msg_age > 600:
-        return
-
-    text = event.raw_text
-    text_lower = text.lower()
-
-    if any(sw in text_lower for sw in STOP_WORDS):
-        return
-
-    trigger = next((w for w in TRIGGER_WORDS if w in text_lower), None)
-    if not trigger:
-        return
-
-    if get_status(uid):
-        return
-
-    set_status(uid, "processing")
-
-    log(f"🎯 HIT: {uid}")
-
-    if not await ai_check(text):
-        set_status(uid, "rejected")
-        return
-
     try:
+        uid = event.sender_id
+
+        chat = await event.get_chat()
+        chat_title = getattr(chat, 'title', 'PRIVATE')
+
+        text = event.raw_text or ""
+
+        log(f"📩 MSG | chat: {chat_title} | user: {uid}")
+        log(f"💬 TEXT: {text}")
+
+        if not uid:
+            log("⛔ нет uid")
+            return
+
+        sender = await event.get_sender()
+
+        if getattr(sender, 'bot', False):
+            log("🤖 skip bot")
+            return
+
+        if not event.is_group:
+            log("⏭️ skip private")
+            return
+
+        text_lower = text.lower()
+
+        # стоп-слова
+        if any(sw in text_lower for sw in STOP_WORDS):
+            log("⛔ стоп-слово")
+            return
+
+        # триггер
+        trigger = next((w for w in TRIGGER_WORDS if w in text_lower), None)
+
+        if not trigger:
+            log("⏭️ нет триггера")
+            return
+
+        log(f"🎯 TRIGGER: {trigger}")
+
+        # дубль
+        if get_status(uid):
+            log("🔁 уже есть в базе")
+            return
+
+        set_status(uid, "processing")
+
+        # AI
+        if not await ai_check(text):
+            log("❌ AI отказ")
+            set_status(uid, "rejected")
+            return
+
         username = f"@{sender.username}" if sender.username else None
 
         if not username:
+            log("⛔ нет username")
             set_status(uid, "no_username")
             return
 
-        phone_in_text = extract_phone(text)
-        user_phone = getattr(sender, 'phone', 'hidden')
-        user_link = f"tg://user?id={uid}"
-
+        # отчёт
         report = (
-            f"🎯 **НОВЫЙ ЛИД**\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 ЛИД\n"
             f"{RECRUITER_TAG}\n\n"
-            f"👤 Имя: {sender.first_name or '—'} {sender.last_name or ''}\n"
-            f"🆔 ID: `{uid}`\n"
-            f"🔗 Username: {username}\n"
-            f"📱 Телефон (профиль): `{user_phone}`\n"
-            f"📞 Телефон (текст): `{phone_in_text}`\n"
-            f"🏠 Группа: {chat.title if hasattr(chat, 'title') else '—'}\n"
-            f"🔗 Ссылка: tg://user?id={uid}\n\n"
-            f"💬 Сообщение:\n_{text[:300]}_\n\n"
-            f"🔍 Триггер: #{trigger.replace(' ', '_')}"
+            f"👤 {sender.first_name}\n"
+            f"🆔 {uid}\n"
+            f"🔗 {username}\n"
+            f"📞 {extract_phone(text)}\n"
+            f"🏠 {chat_title}\n\n"
+            f"{text[:200]}"
         )
 
-        await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
+        log("📤 отправка отчёта...")
+        await client.send_message(REPORT_CHAT_ID, report)
 
         set_status(uid, "sent")
 
+        # антифлуд
         if not can_send():
-            log("⛔ Flood limit")
+            log("⛔ flood limit")
             return
 
-        await asyncio.sleep(random.randint(60, 180))
+        await asyncio.sleep(30)
 
-        if random.random() < 0.5:
-            log("⏭️ Skip DM (random)")
-            return
+        await client.send_message(uid, "Здравствуйте! Актуально еще?")
 
-        await client.send_message(uid, "Здравствуйте! Увидела ваш пост. Актуально еще?")
-
-        log(f"💌 Sent DM: {uid}")
+        log("💌 отправлено ЛС")
 
     except Exception as e:
         log(f"❌ ERROR: {e}")
-        set_status(uid, "error")
 
 # ====================== HEALTH ======================
 def health():
@@ -240,6 +227,14 @@ async def main():
 
     me = await client.get_me()
     log(f"🚀 Started: {me.first_name}")
+
+    log("📡 Загружаю диалоги...")
+    dialogs = await client.get_dialogs()
+
+    for d in dialogs[:20]:
+        log(f"👉 Диалог: {d.name}")
+
+    log("✅ Готов слушать сообщения...")
 
     await client.run_until_disconnected()
 
