@@ -12,9 +12,9 @@ from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ========================= КОНФИГУРАЦИЯ =========================
-API_ID = 35975193
-API_HASH = '5929ba2233799d47756cfee57b71c4a5'
-REPORT_CHAT_ID = 8748575384
+API_ID = 38994094
+API_HASH = 'ece2cfe429e0150d7792c371fe5302b8'
+REPORT_CHAT_ID = 8119593834
 RECRUITER_TAG = "@HRpolsha"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -23,21 +23,14 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
 
-# ====================== УЛУЧШЕННЫЕ ТРИГГЕРЫ ======================
+# ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
-    # Переезд и граница
     "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
     "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась", "освядчение",
-    "karta pobytu", "meldunek", "запрос на визу",
-
-    # Жильё
+    "karta pobytu", "meldunek",
     "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку", "жилье посуточно",
-    "зніму квартиру", "шукаю житло", "mieszkanie", "kawalerka",
-
-    # Работа
-    "ищу работу", "шукаю роботу", "подработка", "підробіток", "работа без языка",
-
-    # Медицина и дети
+    "зніму квартиру", "шукаю житло",
+    "ищу работу", "шукаю роботу", "подработка", "підробіток",
     "детский сад", "садик", "школа для ребенка", "800+", "dobry start", "русскоговорящий врач"
 ]
 
@@ -84,7 +77,7 @@ async def ai_check(text, mode="is_lead"):
             temperature=0
         )
         answer = res.choices[0].message.content.strip().upper()
-        log(f"🧠 ИИ [{mode}]: {answer} | Текст: {text[:60]}...")
+        log(f"🧠 ИИ [{mode}]: {answer}")
         return "ДА" in answer
     except Exception as e:
         log(f"❌ Ошибка ИИ: {e}")
@@ -103,7 +96,7 @@ async def handler(event):
     text = event.raw_text.strip()
     text_lower = text.lower()
 
-    log(f"📨 Новое сообщение от {uid} | Длина: {len(text)} | Текст: {text[:80]}...")
+    log(f"📨 Сообщение от {uid} | Длина: {len(text)} | Текст: {text[:70]}...")
 
     # Личные сообщения
     if event.is_private:
@@ -122,13 +115,11 @@ async def handler(event):
     # Группы
     if not event.is_group:
         return
-
-    # Убрали жёсткий фильтр по времени для теста
-    # if (datetime.now(timezone.utc) - event.date).total_seconds() > 600:
-    #     return
+    if (datetime.now(timezone.utc) - event.date).total_seconds() > 600:
+        return
 
     if any(word in text_lower for word in STOP_WORDS):
-        log(f"⛔️ Стоп-слово найдено, пропускаем")
+        log("⛔️ Найдено стоп-слово, пропускаем")
         return
 
     # Проверка триггеров
@@ -138,33 +129,44 @@ async def handler(event):
             matched_trigger = word
             break
 
-    if matched_trigger:
-        log(f"🔍 Найден триггер: '{matched_trigger}'")
-        if get_status(uid) is None:
-            if await ai_check(text, "is_lead"):
-                try:
-                    chat = await event.get_chat()
-                    username = f"@{event.sender.username}" if event.sender.username else f"ID:{uid}"
-                    msg_link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}"
+    if matched_trigger and get_status(uid) is None:
+        if await ai_check(text, "is_lead"):
+            try:
+                # Получаем полную информацию о пользователе
+                user = await client.get_entity(uid)
+                chat = await event.get_chat()
 
-                    report = f"🎯 **ЛИД НАЙДЕН**\n👤 {event.sender.first_name} ({username})\n🏠 {chat.title}\n💬 {text[:150]}\n🔗 [Ссылка]({msg_link})"
+                username = f"@{user.username}" if user.username else "Нет username"
+                phone = user.phone if hasattr(user, 'phone') and user.phone else "Скрыт"
 
-                    await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
+                # Прямая ссылка на профиль
+                user_link = f"tg://user?id={uid}"
 
-                    set_status(uid, "sent")
-                    await asyncio.sleep(random.randint(40, 120))
+                report = (
+                    f"🎯 **ЛИД НАЙДЕН**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 Имя: {user.first_name or '—'}\n"
+                    f"🆔 ID: `{uid}`\n"
+                    f"📱 Телефон: {phone}\n"
+                    f"🔗 Прямая ссылка: [Открыть профиль]({user_link})\n"
+                    f"🏠 Группа: {chat.title}\n"
+                    f"💬 Сообщение: {text[:180]}\n"
+                    f"🔍 Триггер: {matched_trigger}\n"
+                    f"━━━━━━━━━━━━━━━━━━"
+                )
 
-                    await client.send_message(uid, "Здравствуйте! Видела ваше сообщение про пеший переход. Могу подсказать варианты.")
-                    log(f"✅ Сообщение отправлено пользователю {uid} (триггер: {matched_trigger})")
+                await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
 
-                except Exception as e:
-                    log(f"❌ Ошибка при отправке: {e}")
-            else:
-                log(f"🧠 ИИ сказал НЕТ для этого сообщения")
+                set_status(uid, "sent")
+                await asyncio.sleep(random.randint(50, 160))
+
+                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
+                log(f"✅ Сообщение отправлено → {uid} (триггер: {matched_trigger})")
+
+            except Exception as e:
+                log(f"❌ Ошибка при обработке лида {uid}: {e}")
         else:
-            log(f"⏭️ Пользователь {uid} уже в базе, пропускаем")
-    else:
-        log(f"⚠️ Триггер не найден в сообщении")
+            log("🧠 ИИ отклонил лида")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -178,7 +180,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Тестирование триггеров v3.1")
+    log("🎯 Режим: Lead Generator v3.2 — с прямой ссылкой и телефоном")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
