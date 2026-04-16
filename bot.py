@@ -12,28 +12,28 @@ from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ========================= БАЗОВЫЕ ДАННЫЕ =========================
-API_ID = 38165468
-API_HASH = '387dc50469f115c50fc7a4f36a9b84b3'
-REPORT_CHAT_ID = 8348598832
-RECRUITER_TAG = "@botlooklead"
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+REPORT_CHAT_ID = 8748575384
+RECRUITER_TAG = "@HRivan2"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 DB_PATH = "leads_v3.db"
 
-# ====================== ЗАГРУЗКА ДО 6 СЕССИЙ ======================
+# ====================== ЗАГРУЗКА СЕССИЙ (до 6) ======================
 ACCOUNTS = {}
-for i in range(1, 7):  # от 1 до 6
+for i in range(1, 7):
     session = os.getenv(f"TELEGRAM_SESSION{i}")
     if session:
         ACCOUNTS[f"account{i}"] = session
 
 if not ACCOUNTS:
-    print("❌ Ошибка: Не найдено ни одной сессии (TELEGRAM_SESSION1 ... TELEGRAM_SESSION6)")
+    print("❌ Не найдено ни одной сессии!")
     exit(1)
 
-print(f"✅ Загружено аккаунтов: {len(ACCOUNTS)}")
+print(f"✅ Загружено {len(ACCOUNTS)} аккаунтов")
 
 # ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
@@ -91,11 +91,8 @@ async def ai_check(text, mode="is_lead"):
     except:
         return False
 
-# ====================== ЗАПУСК ОДНОГО АККАУНТА ======================
+# ====================== ЗАПУСК АККАУНТА ======================
 async def start_account(account_name, session_str):
-    if not session_str:
-        return
-
     client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
 
     @client.on(events.NewMessage)
@@ -127,11 +124,11 @@ async def start_account(account_name, session_str):
                         await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
                         log(f"✅ Лид найден с аккаунта {account_name}")
                     except Exception as e:
-                        log(f"Ошибка отправки отчёта с {account_name}: {e}")
+                        log(f"Ошибка с {account_name}: {e}")
 
     await client.start()
     me = await client.get_me()
-    log(f"✅ Аккаунт {account_name} запущен → {me.first_name} (@{me.username or '—'})")
+    log(f"✅ {account_name} запущен → {me.first_name} (@{me.username or '—'})")
 
     await client.run_until_disconnected()
 
@@ -146,15 +143,8 @@ async def main():
 
     log("🚀 Запуск Multi-Account Lead Generator (до 6 аккаунтов)...")
 
-    tasks = []
-    for name, session in ACCOUNTS.items():
-        if session:
-            tasks.append(start_account(name, session))
-
-    if tasks:
-        await asyncio.gather(*tasks)
-    else:
-        log("❌ Нет активных сессий для запуска!")
+    tasks = [start_account(name, session) for name, session in ACCOUNTS.items()]
+    await asyncio.gather(*tasks)
 
 if __name__ == '__main__':
     asyncio.run(main())
