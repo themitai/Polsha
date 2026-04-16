@@ -23,16 +23,21 @@ SESSION_STR = os.getenv("TELEGRAM_SESSION")
 ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 DB_PATH = "leads_v3.db"
 
-# ====================== ТРИГГЕРЫ ======================
+# ====================== СТРОГИЕ ТРИГГЕРЫ (только соискатели) ======================
 TRIGGER_WORDS = [
-    "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
-    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
-    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку",
-    "ищу работу", "шукаю роботу", "подработка", "підробіток",
-    "детский сад", "садик", "школа для ребенка", "800+", "dobry start"
+    "ищу работу", "шукаю роботу", "ищу подработку", "шукаю підробіток", 
+    "ищу подработку", "нужна работа", "потрібна робота", "ищу подработку на",
+    "ищу подработку срочно", "подработка нужна", "работа нужна", "работу ищу",
+    "ищу любой подработок", "ищу любую работу", "работа для меня", "подработка для меня"
 ]
 
-STOP_WORDS = ["ищем", "требуется", "вакансия", "набираем", "предлагаем", "услуги", "помогу"]
+# Сильные стоп-слова для работодателей
+STOP_WORDS = [
+    "ищем", "требуется", "вакансия", "набираем", "предлагаем", "предлагаємо",
+    "набор персонала", "идёт набор", "ищем людей", "требуются", "вакансии",
+    "работа для", "подработка для", "зарплата от", "зп от", "условия работы",
+    "график работы", "приглашаем", "приглашаємо"
+]
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -62,20 +67,29 @@ def set_status(user_id, status, category="unknown"):
     except:
         pass
 
-# ====================== ИИ ======================
+# ====================== ИИ (усиленный) ======================
 async def ai_check(text, mode="is_lead"):
     if not ai_client:
         return True
     try:
-        prompt = "Ответь ТОЛЬКО ДА или НЕТ. ДА — если человек ищет помощь (жильё, работа, документы, переезд и т.д.)"
+        if mode == "is_lead":
+            prompt = (
+                "Ты — очень строгий фильтр. Ответь ТОЛЬКО одним словом: ДА или НЕТ.\n\n"
+                "ДА — только если человек САМ ИЩЕТ работу или подработку.\n"
+                "НЕТ — если это работодатель, который предлагает работу, набирает людей, размещает вакансию.\n"
+                "Будь максимально строгим. Даже если есть слово 'подработка', но контекст предложения — отвечай НЕТ."
+            )
+        else:
+            prompt = "Человек проявил интерес к твоему предложению? Ответь ТОЛЬКО ДА или НЕТ."
+
         res = await ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
-            max_tokens=5,
+            max_tokens=8,
             temperature=0
         )
         answer = res.choices[0].message.content.strip().upper()
-        log(f"🧠 ИИ [{mode}]: {answer}")
+        log(f"🧠 ИИ [{mode}]: {answer} | Текст: {text[:70]}...")
         return "ДА" in answer
     except Exception as e:
         log(f"❌ Ошибка ИИ: {e}")
@@ -114,6 +128,7 @@ async def handler(event):
         return
 
     if any(word in text_lower for word in STOP_WORDS):
+        log("⛔️ Стоп-слово (работодатель), пропускаем")
         return
 
     matched_trigger = next((word for word in TRIGGER_WORDS if word in text_lower), None)
@@ -121,13 +136,13 @@ async def handler(event):
     if matched_trigger and get_status(uid) is None:
         if await ai_check(text, "is_lead"):
             try:
-                # Получаем информацию о пользователе
                 user = await client.get_entity(uid)
                 chat = await event.get_chat()
 
                 username = f"@{user.username}" if user.username else "Нет username"
                 phone = getattr(user, 'phone', None) or "Скрыт"
                 user_link = f"tg://user?id={uid}"
+                message_link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.id}"
 
                 report = (
                     f"🎯 **ЛИД НАЙДЕН**\n"
@@ -135,29 +150,27 @@ async def handler(event):
                     f"👤 Имя: {user.first_name or '—'}\n"
                     f"🆔 ID: `{uid}`\n"
                     f"📱 Телефон: {phone}\n"
-                    f"🔗 Прямая ссылка на профиль: [Открыть чат]({user_link})\n"
+                    f"🔗 Прямая ссылка: [Открыть чат]({user_link})\n"
+                    f"🔗 Ссылка на сообщение: [Открыть]({message_link})\n"
                     f"🏠 Группа: {chat.title}\n"
-                    f"💬 Сообщение: {text[:200]}\n"
+                    f"💬 Сообщение: {text[:220]}\n"
                     f"🔍 Триггер: {matched_trigger}"
                 )
 
                 await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
-                log(f"✅ Отчёт о лиде отправлен в REPORT_CHAT_ID")
+                log(f"✅ Отчёт отправлен в REPORT_CHAT_ID")
 
                 set_status(uid, "sent")
 
                 await asyncio.sleep(random.randint(50, 160))
 
-                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по вашему вопросу.")
-                log(f"✅ Первое сообщение отправлено пользователю {uid}")
+                await client.send_message(uid, "Здравствуйте! Видела ваше сообщение. Могу подсказать варианты по работе.")
+                log(f"✅ Первое сообщение отправлено {uid}")
 
-            except FloodWaitError as e:
-                log(f"⏳ FloodWait: ждём {e.seconds} сек")
-                await asyncio.sleep(e.seconds)
-            except UserIsBlockedError:
-                log(f"⛔ Пользователь {uid} заблокировал бота")
             except Exception as e:
                 log(f"❌ Ошибка при обработке лида {uid}: {e}")
+        else:
+            log("🧠 ИИ сказал НЕТ (это не соискатель)")
 
 # ====================== ЗАПУСК ======================
 async def main():
@@ -171,7 +184,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     log(f"🚀 Бот запущен на аккаунте: {me.first_name} (@{me.username or '—'})")
-    log("🎯 Режим: Lead Generator v3.7 — с прямой ссылкой и телефоном")
+    log("🎯 Режим: Строгий поиск только соискателей v3.9")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
