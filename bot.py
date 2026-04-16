@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # ========================= БАЗОВЫЕ ДАННЫЕ =========================
 API_ID = int(os.getenv("API_ID", 35975193))
 API_HASH = os.getenv("API_HASH", "5929ba2233799d47756cfee57b71c4a5")
-REPORT_CHAT_ID = 8748575384
+REPORT_CHAT_ID = 8640482176
 RECRUITER_TAG = "@HRivan2"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
