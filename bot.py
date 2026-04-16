@@ -3,17 +3,18 @@ import os
 import sqlite3
 import random
 import threading
+import sys
 from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, UserIsBlockedError
+from telethon.errors import FloodWaitError, UserIsBlockedError, AuthKeyUnregisteredError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ========================= БАЗОВЫЕ ДАННЫЕ =========================
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
+API_ID = int(os.getenv("API_ID", 35975193))
+API_HASH = os.getenv("API_HASH", "5929ba2233799d47756cfee57b71c4a5")
 REPORT_CHAT_ID = 8748575384
 RECRUITER_TAG = "@HRivan2"
 
@@ -22,18 +23,21 @@ ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 DB_PATH = "leads_v3.db"
 
-# ====================== ЗАГРУЗКА СЕССИЙ (до 6) ======================
+# ====================== ЗАГРУЗКА СЕССИЙ ======================
 ACCOUNTS = {}
 for i in range(1, 7):
-    session = os.getenv(f"TELEGRAM_SESSION{i}")
-    if session:
-        ACCOUNTS[f"account{i}"] = session
+    session_str = os.getenv(f"TELEGRAM_SESSION{i}")
+    if session_str and session_str.strip():
+        ACCOUNTS[f"account{i}"] = session_str.strip()
+        print(f"✅ Найдена сессия TELEGRAM_SESSION{i}")
+    else:
+        print(f"⚠️ TELEGRAM_SESSION{i} не найдена или пустая")
 
 if not ACCOUNTS:
-    print("❌ Не найдено ни одной сессии!")
-    exit(1)
+    print("❌ Критическая ошибка: Не найдено ни одной валидной сессии!")
+    sys.exit(1)
 
-print(f"✅ Загружено {len(ACCOUNTS)} аккаунтов")
+print(f"🚀 Будет запущено {len(ACCOUNTS)} аккаунтов")
 
 # ====================== ТРИГГЕРЫ ======================
 TRIGGER_WORDS = [
@@ -93,6 +97,8 @@ async def ai_check(text, mode="is_lead"):
 
 # ====================== ЗАПУСК АККАУНТА ======================
 async def start_account(account_name, session_str):
+    log(f"🔄 Запуск аккаунта {account_name}...")
+
     client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
 
     @client.on(events.NewMessage)
@@ -124,13 +130,17 @@ async def start_account(account_name, session_str):
                         await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
                         log(f"✅ Лид найден с аккаунта {account_name}")
                     except Exception as e:
-                        log(f"Ошибка с {account_name}: {e}")
+                        log(f"Ошибка отправки отчёта с {account_name}: {e}")
 
-    await client.start()
-    me = await client.get_me()
-    log(f"✅ {account_name} запущен → {me.first_name} (@{me.username or '—'})")
-
-    await client.run_until_disconnected()
+    try:
+        await client.start()
+        me = await client.get_me()
+        log(f"✅ Аккаунт {account_name} успешно запущен → {me.first_name} (@{me.username or '—'})")
+        await client.run_until_disconnected()
+    except AuthKeyUnregisteredError:
+        log(f"❌ Сессия {account_name} недействительна. Нужно обновить TELEGRAM_SESSION{account_name[-1]}")
+    except Exception as e:
+        log(f"❌ Ошибка запуска аккаунта {account_name}: {e}")
 
 # ====================== MAIN ======================
 async def main():
@@ -144,7 +154,7 @@ async def main():
     log("🚀 Запуск Multi-Account Lead Generator (до 6 аккаунтов)...")
 
     tasks = [start_account(name, session) for name, session in ACCOUNTS.items()]
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 if __name__ == '__main__':
     asyncio.run(main())
