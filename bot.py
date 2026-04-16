@@ -3,158 +3,214 @@ import os
 import sqlite3
 import random
 import threading
-import sys
 from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, UserIsBlockedError, AuthKeyUnregisteredError
+from telethon.tl.types import User, Channel, Chat
+from telethon.errors import FloodWaitError
 from openai import AsyncOpenAI
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ========================= БАЗОВЫЕ ДАННЫЕ =========================
-API_ID = int(os.getenv("API_ID", 35975193))
-API_HASH = os.getenv("API_HASH", "5929ba2233799d47756cfee57b71c4a5")
-REPORT_CHAT_ID = 8640482176
-RECRUITER_TAG = "@HRivan2"
-
+# --- КОНФИГУРАЦИЯ ---
+API_ID = 37897013
+API_HASH = '4c05731c6550d62f453d2d7f27c5385d'
+REPORT_CHAT_ID = 8222464836
+RECRUITER_TAG = "@leadbotchecker"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+SESSION_STR = os.getenv("TELEGRAM_SESSION")
 
-DB_PATH = "leads_v3.db"
+ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+DB_PATH = "is_seeker_v11.db"
 
-# ====================== ЗАГРУЗКА СЕССИЙ ======================
-ACCOUNTS = {}
-for i in range(1, 7):
-    session_str = os.getenv(f"TELEGRAM_SESSION{i}")
-    if session_str and session_str.strip():
-        ACCOUNTS[f"account{i}"] = session_str.strip()
-        print(f"✅ Найдена сессия TELEGRAM_SESSION{i}")
-    else:
-        print(f"⚠️ TELEGRAM_SESSION{i} не найдена или пустая")
-
-if not ACCOUNTS:
-    print("❌ Критическая ошибка: Не найдено ни одной валидной сессии!")
-    sys.exit(1)
-
-print(f"🚀 Будет запущено {len(ACCOUNTS)} аккаунтов")
-
-# ====================== ТРИГГЕРЫ ======================
-TRIGGER_WORDS = [
-    "пеший переход", "приехал сегодня", "очередь на границе", "еду в польшу", "выезжаю из",
-    "карта побыту", "мельдунок", "pesel", "подача на карту", "виза закончилась",
-    "ищу жилье", "сниму квартиру", "нужна комната", "ищу кавалерку",
-    "ищу работу", "шукаю роботу", "подработка", "підробіток",
-    "детский сад", "садик", "школа для ребенка", "800+", "dobry start"
+# --- ВАРИАНТЫ ПЕРВОГО СООБЩЕНИЯ ---
+FIRST_MESSAGES = [
+    "Здравствуйте! Увидела ваше сообщение в группе. Вам было бы интересно узнать подробности?",
+    "Добрый день! Заметила ваш пост в чате. Могу рассказать детали.",
+    "Приветствую! Наткнулась на ваше объявление в группе. Хотели бы ознакомиться с условиями?",
+    "Здравствуйте! Вы писали в групп. . Если актуально, могу скинуть подробности."
 ]
-
-STOP_WORDS = ["ищем", "требуется", "вакансия", "набираем", "предлагаем", "услуги", "помогу"]
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ====================== БАЗА ======================
+# --- HEALTH SERVER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args): return
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('CREATE TABLE IF NOT EXISTS leads (user_id INTEGER PRIMARY KEY, status TEXT, category TEXT, account TEXT)')
+    conn.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT)')
     conn.close()
+    log("📂 База данных инициализирована.")
 
 def get_status(user_id):
     try:
         conn = sqlite3.connect(DB_PATH)
-        row = conn.execute("SELECT status FROM leads WHERE user_id=?", (user_id,)).fetchone()
+        row = conn.execute("SELECT status FROM users WHERE user_id=?", (user_id,)).fetchone()
         conn.close()
         return row[0] if row else None
-    except:
+    except Exception as e:
+        log(f"❌ Ошибка при чтении БД: {e}")
         return None
 
-def set_status(user_id, status, category="unknown", account="unknown"):
+def set_status(user_id, status):
     try:
         conn = sqlite3.connect(DB_PATH)
-        conn.execute("INSERT OR REPLACE INTO leads (user_id, status, category, account) VALUES (?, ?, ?, ?)",
-                     (user_id, status, category, account))
+        conn.execute("INSERT OR REPLACE INTO users (user_id, status) VALUES (?, ?)", (user_id, status))
         conn.commit()
         conn.close()
-    except:
-        pass
+        log(f"💾 Статус пользователя {user_id} обновлен на: {status}")
+    except Exception as e:
+        log(f"❌ Ошибка записи в БД: {e}")
 
-# ====================== ИИ ======================
-async def ai_check(text, mode="is_lead"):
-    if not ai_client:
-        return True
+# --- ИИ МОЗГ ---
+async def ai_check(text, mode="is_seeker"):
+    if not text or len(text) < 2: return False
+    
+    label = "ПОИСК ЛИДА" if mode == "is_seeker" else "АНАЛИЗ ИНТЕРЕСА"
+    log(f"🧠 ИИ ({label}) проверяет текст: {text[:60]}...")
+    
     try:
-        prompt = "Ответь ТОЛЬКО ДА или НЕТ. ДА — если человек ищет помощь (жильё, работа, документы, переезд и т.д.)."
+        if mode == "is_seeker":
+            sys_prompt = "Ты HR. Ответь ДА, только если человек САМ ищет работу, переезд, переход, доход. НЕТ — если это вакансия, реклама услуг или спам."
+        else:
+            sys_prompt = "Клиент заинтересован в предложении? Ответь ДА или НЕТ."
+
         res = await ai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
-            max_tokens=5,
-            temperature=0
+            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
+            max_tokens=5, temperature=0
         )
-        answer = res.choices[0].message.content.strip().upper()
-        return "ДА" in answer
-    except:
+        ans = res.choices[0].message.content.strip().upper()
+        
+        is_positive = "ДА" in ans
+        log(f"🤖 Вердикт ИИ: {'✅ ДА' if is_positive else '❌ НЕТ'} (ответ: {ans})")
+        return is_positive
+    except Exception as e:
+        log(f"❌ Ошибка ИИ: {e}")
         return False
 
-# ====================== ЗАПУСК АККАУНТА ======================
-async def start_account(account_name, session_str):
-    log(f"🔄 Запуск аккаунта {account_name}...")
+# --- ОБРАБОТЧИК ---
+init_db()
+client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
-    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+@client.on(events.NewMessage)
+async def handler(event):
+    if not event.sender_id: return
+    
+    # Игнорируем ботов
+    is_bot = getattr(event.sender, 'bot', False) if hasattr(event.sender, 'bot') else False
+    if not isinstance(event.sender, User) or is_bot: return
 
-    @client.on(events.NewMessage)
-    async def handler(event):
-        if not event.is_group or not event.sender_id:
-            return
+    uid = event.sender_id
+    text = event.raw_text.strip()
+    
+    # 1. ЛИЧНЫЕ СООБЩЕНИЯ
+    if event.is_private:
+        status = get_status(uid)
+        if status in ("sent", "offered"):
+            log(f"📩 Получено ЛС от пользователя {uid}. Статус в базе: {status}")
+            if await ai_check(text, "is_interest"):
+                await asyncio.sleep(random.randint(5, 12))
+                try:
+                    if status == "sent":
+                        await event.reply("💼 **Условия:** Удаленно (крипто). ЗП 2000€ + %. Подходит?")
+                        set_status(uid, "offered")
+                    elif status == "offered":
+                        await event.reply(f"Напишите куратору: {RECRUITER_TAG}")
+                        set_status(uid, "final")
+                        await client.send_message(REPORT_CHAT_ID, f"🔥 **ЛИД ДОЖАТ!**\n👤 ID: {uid}\n🔗 [ПЕРЕЙТИ К ДИАЛОГУ](tg://user?id={uid})", link_preview=False)
+                except FloodWaitError as e:
+                    log(f"⏳ FloodWait в ЛС: ждем {e.seconds} сек.")
+                    await asyncio.sleep(e.seconds)
+        return
 
-        text_lower = event.raw_text.lower()
+    # 2. ГРУППЫ
+    if event.is_group:
+        # Логируем только подозрительно короткие или длинные интервалы (для контроля работы)
+        if (datetime.now(timezone.utc) - event.date).total_seconds() > 600:
+            return # Старые сообщения не трогаем
 
-        if any(word in text_lower for word in STOP_WORDS):
-            return
+        # Вызываем ИИ только если пользователя нет в базе
+        status = get_status(uid)
+        if status is not None:
+            return # Мы уже работали с ним
 
-        if any(word in text_lower for word in TRIGGER_WORDS):
-            if get_status(event.sender_id) is None:
-                if await ai_check(event.raw_text, "is_lead"):
-                    try:
-                        chat = await event.get_chat()
-                        user_link = f"tg://user?id={event.sender_id}"
+        if await ai_check(text, "is_seeker"):
+            try:
+                chat = await event.get_chat()
+                group_name = chat.title
+                username = f"@{event.sender.username}" if event.sender.username else f"ID: {uid}"
+                user_url = f"tg://user?id={uid}"
+                
+                # Ссылка на сообщение
+                msg_id = event.id
+                chat_id = str(event.chat_id).replace("-100", "")
+                if hasattr(chat, 'username') and chat.username:
+                    msg_link = f"https://t.me/{chat.username}/{msg_id}"
+                else:
+                    msg_link = f"https://t.me/c/{chat_id}/{msg_id}"
 
-                        report = (
-                            f"🎯 **ЛИД НАЙДЕН** | {account_name.upper()}\n"
-                            f"👤 {event.sender.first_name or '—'}\n"
-                            f"🆔 `{event.sender_id}`\n"
-                            f"🔗 [Профиль]({user_link})\n"
-                            f"🏠 Группа: {chat.title}\n"
-                            f"💬 {event.raw_text[:180]}"
-                        )
+                log(f"🎯 ЛИД ПОДТВЕРЖДЕН: {username} в группе '{group_name}'")
 
-                        await client.send_message(REPORT_CHAT_ID, report, link_preview=False)
-                        log(f"✅ Лид найден с аккаунта {account_name}")
-                    except Exception as e:
-                        log(f"Ошибка отправки отчёта с {account_name}: {e}")
+                # Отчет
+                report_text = (
+                    f"🎯 **НОВЫЙ ЛИД ОБНАРУЖЕН**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **Имя:** {event.sender.first_name or 'User'}\n"
+                    f"🆔 **Аккаунт:** [{username}]({user_url})\n"
+                    f"🏢 **Группа:** {group_name}\n"
+                    f"📝 **Сообщение:** \n_{text}_\n\n"
+                    f"🔗 [ССЫЛКА НА СООБЩЕНИЕ]({msg_link})"
+                )
+                
+                await client.send_message(REPORT_CHAT_ID, report_text, link_preview=False)
+                set_status(uid, "sent")
 
-    try:
-        await client.start()
-        me = await client.get_me()
-        log(f"✅ Аккаунт {account_name} успешно запущен → {me.first_name} (@{me.username or '—'})")
-        await client.run_until_disconnected()
-    except AuthKeyUnregisteredError:
-        log(f"❌ Сессия {account_name} недействительна. Нужно обновить TELEGRAM_SESSION{account_name[-1]}")
-    except Exception as e:
-        log(f"❌ Ошибка запуска аккаунта {account_name}: {e}")
+                # Безопасная пауза
+                delay = random.randint(90, 210)
+                log(f"⏳ Имитация раздумий: пауза {delay} сек перед отправкой сообщения {username}...")
+                await asyncio.sleep(delay)
 
-# ====================== MAIN ======================
+                # Обновляем сущность пользователя (защита от PeerUser error)
+                log(f"🔍 Обновление данных пользователя {uid} перед отправкой...")
+                input_peer = await client.get_input_entity(uid)
+                
+                # Отправка
+                chosen_msg = random.choice(FIRST_MESSAGES)
+                await client.send_message(input_peer, chosen_msg)
+                log(f"✅ Сообщение успешно отправлено в ЛС к {username}")
+
+            except FloodWaitError as e:
+                log(f"⚠️ Остановка потока: Telegram FloodWait на {e.seconds} сек.")
+                await asyncio.sleep(e.seconds)
+            except Exception as e:
+                log(f"❌ Ошибка при обработке лида {uid}: {e}")
+
 async def main():
-    def health():
-        port = int(os.getenv("PORT", 8080))
-        server = HTTPServer(('0.0.0.0', port),
-            type('H', (BaseHTTPRequestHandler,), {'do_GET': lambda s: (s.send_response(200), s.end_headers(), s.wfile.write(b"OK"))}))
-        server.serve_forever()
-    threading.Thread(target=health, daemon=True).start()
-
-    log("🚀 Запуск Multi-Account Lead Generator (до 6 аккаунтов)...")
-
-    tasks = [start_account(name, session) for name, session in ACCOUNTS.items()]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    threading.Thread(target=run_health_server, daemon=True).start()
+    log("🔌 Подключение к Telegram...")
+    await client.start()
+    
+    me = await client.get_me()
+    log(f"🚀 БОТ ЗАПУЩЕН на аккаунте: {me.first_name} (@{me.username or 'no_user'})")
+    log("👀 Мониторинг групп начат...")
+    
+    await client.run_until_disconnected()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log("👋 Бот остановлен вручную.")
